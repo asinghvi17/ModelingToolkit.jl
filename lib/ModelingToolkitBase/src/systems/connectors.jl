@@ -23,7 +23,7 @@ Connect multiple connectors created via `@connector`. All connected connectors
 must be unique.
 """
 function connect(sys1::AbstractSystem, sys2::AbstractSystem, syss::AbstractSystem...)
-    _syss = System[]
+    _syss = AbstractSystem[]
     push!(_syss, sys1)
     push!(_syss, sys2)
     for sys in syss
@@ -63,7 +63,7 @@ isconnection(_::Connection) = true
 Adds a domain only connection equation, through and across state equations are not generated.
 """
 function domain_connect(sys1::AbstractSystem, sys2::AbstractSystem, syss::AbstractSystem...)
-    _syss = System[]
+    _syss = AbstractSystem[]
     push!(_syss, sys1)
     push!(_syss, sys2)
     for sys in syss
@@ -555,8 +555,8 @@ function _generate_connectionsets!(
         systems::Vector{T},
         isouter::IsOuter
     ) where {T <: AbstractSystem}
-    systems = systems::Vector{System}
-    regular_systems = System[]
+    systems = systems::Vector{<:AbstractSystem}
+    regular_systems = AbstractSystem[]
     domain_system::Union{Nothing, System} = nothing
     for s in systems
         if is_domain_connector(s)
@@ -730,7 +730,7 @@ function handle_maybe_connect_equation!(
     )
     if get_systems(lhs) === :domain
         # This is a domain connection, so we only update the domain connection graph
-        syss = get_systems(rhs)::Vector{System}
+        syss = get_systems(rhs)::Vector{<:AbstractSystem}
         hyperedge = ConnectionVertex[]
         for sys in syss
             sysname = nameof(sys)
@@ -823,7 +823,7 @@ function _generate_connection_set!(
         end
         pop!(namespace)
     end
-    new_systems = System[]
+    new_systems = AbstractSystem[]
     for s in subsys
         news = generate_connection_set!(connection_state, negative_connection_state, s, namespace)
         push!(new_systems, news)
@@ -961,9 +961,9 @@ function get_domain_bindings(
     )
     binds = SymmapT()
     for cset in domain_csets
-        systems = System[]
+        systems = AbstractSystem[]
         for cvar in cset
-            push!(systems, variable_from_vertex(sys, cvar)::System)
+            push!(systems, variable_from_vertex(sys, cvar)::AbstractSystem)
         end
         idx = findfirst(is_domain_connector, systems)
         idx === nothing && continue
@@ -1094,7 +1094,7 @@ the flow variable in that connector.
 """
 function get_flowvar(sys::AbstractSystem, cvert::ConnectionVertex)
     tmp = pop!(cvert.name)
-    parent_sys = iterative_getproperty(sys, cvert.name)::System
+    parent_sys = iterative_getproperty(sys, cvert.name)::AbstractSystem
     push!(cvert.name, tmp)
     for var in unknowns(parent_sys)
         type = get_connection_type(var)

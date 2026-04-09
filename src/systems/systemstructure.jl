@@ -7,7 +7,7 @@ Descend through the system hierarchy and look for statemachines. Remove equation
 the inner statemachine systems. Return the new `sys` and an array of top-level
 statemachines.
 """
-function extract_top_level_statemachines(sys::System)
+function extract_top_level_statemachines(sys::AbstractSystem)
     eqs = get_eqs(sys)
     predicate = Base.Fix2(isa, MTKTearing.StateMachineOperator) ∘ SU.unwrap_const
     if !isempty(eqs) && all(predicate, eqs)
@@ -20,8 +20,8 @@ function extract_top_level_statemachines(sys::System)
     else
         # descend
         subsystems = get_systems(sys)
-        newsubsystems = System[]
-        statemachines = System[]
+        newsubsystems = AbstractSystem[]
+        statemachines = AbstractSystem[]
         for subsys in subsystems
             newsubsys, sub_statemachines = extract_top_level_statemachines(subsys)
             push!(newsubsystems, newsubsys)
@@ -37,11 +37,15 @@ end
 
 Return `sys` with all equations (including those in subsystems) removed.
 """
-function remove_child_equations(sys::System)
+function remove_child_equations(sys::AbstractSystem)
     @set! sys.eqs = Equation[]
     @set! sys.systems = map(remove_child_equations, get_systems(sys))
     return sys
 end
+
+# FMU systems have no equations to remove and a different struct layout,
+# so `@set! sys.eqs = Equation[]` would fail. No-op is correct here.
+remove_child_equations(sys::AbstractFMUSystem) = sys
 
 function make_eqs_zero_equals!(ts::TearingState)
     neweqs = map(enumerate(get_eqs(ts.sys))) do kvp
