@@ -51,8 +51,12 @@ function collect_fmu_variables(sys, fmu_subsystems)
         for eq in get_observed(fmu)
             push!(fmu_observed, namespace_equation(eq, fmu))
         end
-        append!(fmu_continuous_events, get_continuous_events(fmu))
-        append!(fmu_discrete_events, get_discrete_events(fmu))
+        for cb in get_continuous_events(fmu)
+            push!(fmu_continuous_events, namespace_callback(cb, fmu))
+        end
+        for cb in get_discrete_events(fmu)
+            push!(fmu_discrete_events, namespace_callback(cb, fmu))
+        end
     end
 
     return (;
@@ -97,6 +101,17 @@ function merge_fmu_data(compiled_sys, fmu_data, fmu_subsystems)
     @set! compiled_sys.unknowns = new_unknowns
     @set! compiled_sys.ps = new_ps
     @set! compiled_sys.observed = new_observed
+
+    # Merge FMU events into compiled system
+    if !isempty(fmu_data.continuous_events)
+        new_cont = vcat(get_continuous_events(compiled_sys), fmu_data.continuous_events)
+        @set! compiled_sys.continuous_events = new_cont
+    end
+    if !isempty(fmu_data.discrete_events)
+        new_disc = vcat(get_discrete_events(compiled_sys), fmu_data.discrete_events)
+        @set! compiled_sys.discrete_events = new_disc
+    end
+
     @set! compiled_sys.metadata = fmu_metadata
 
     return compiled_sys

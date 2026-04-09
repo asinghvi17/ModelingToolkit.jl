@@ -92,6 +92,8 @@ function FMUSystem{Mode}(;
         namespacing::Bool = true,
         complete::Bool = false,
         initialization_eqs::Vector{Equation} = Equation[],
+        continuous_events::Vector{Any} = Any[],
+        discrete_events::Vector{Any} = Any[],
     ) where {Mode <: FMUMode}
 
     # Mode-specific validation
@@ -112,12 +114,7 @@ function FMUSystem{Mode}(;
                 "CoSimulation FMU requires a communication_step_size"))
     end
 
-    # Build event callbacks from capabilities
-    cont_events = Any[]
-    disc_events = Any[]
-    if capabilities.n_event_indicators > 0
-        push!(cont_events, FMUContinuousCallback(wrapper, capabilities.n_event_indicators))
-    end
+    # Events are built by the extension and passed in
 
     return FMUSystem{Mode, typeof(wrapper), typeof(value_references)}(
         name,
@@ -132,8 +129,8 @@ function FMUSystem{Mode}(;
         capabilities,
         value_references,
         convert(Dict{SymbolicT, Any}, default_values),
-        cont_events,
-        disc_events,
+        continuous_events,
+        discrete_events,
         communication_step_size,
         convert(Vector{AbstractSystem}, systems),
         parent,

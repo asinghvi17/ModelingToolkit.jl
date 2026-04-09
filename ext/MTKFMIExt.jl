@@ -5,6 +5,7 @@ using ModelingToolkit: t_nounits as t, D_nounits as D
 using DocStringExtensions
 import ModelingToolkit as MTK
 import FMIImport as FMI
+import SciMLBase
 
 """
     $(TYPEDSIGNATURES)
@@ -211,27 +212,79 @@ function MTK.FMIComponent(
 
     # Determine mode
     Mode = type == :ME ? MTK.ModelExchange : MTK.CoSimulation
-    SymbolicT = MTK.SymbolicT
+    SymT = MTK.SymbolicT
 
-    # For ME, include derivative observations in observed
-    all_observed = type == :ME ? [observed; der_observed] : observed
+    # Create symbolic wrapper parameter (callable)
+    buffer_length = length(diffvars) + length(outputs)
+    if Ver == 2
+        @parameters (wrapper_param::FMI2InstanceWrapper)(..)[1:buffer_length] = wrapper_obj
+    else
+        @parameters (wrapper_param::FMI3InstanceWrapper)(..)[1:buffer_length] = wrapper_obj
+    end
 
-    # Return FMUSystem
-    return MTK.FMUSystem{Mode}(;
-        name = name,
-        iv = t,
-        states = SymbolicT.(MTK.unwrap.(diffvars)),
-        derivatives = type == :ME ? SymbolicT.(MTK.unwrap.(dervars)) : SymbolicT[],
-        inputs = SymbolicT.(MTK.unwrap.(inputs)),
-        outputs = SymbolicT.(MTK.unwrap.(outputs)),
-        parameters = SymbolicT.(MTK.unwrap.(params)),
-        observed = all_observed,
-        wrapper = wrapper_obj,
-        capabilities = caps,
-        value_references = vr_dict,
-        default_values = default_dict,
-        communication_step_size = type == :CS ? Float64(communication_step_size) : nothing
-    )
+    if type == :ME
+        # Build symbolic call expression
+        __mtk_internal_u = copy(diffvars)
+        __mtk_internal_x = isempty(inputs) ? Float64[] : copy(inputs)
+        __mtk_internal_p = isempty(params) ? Float64[] : copy(params)
+        call_expr = wrapper_param(__mtk_internal_u, __mtk_internal_x, __mtk_internal_p, t)
+
+        # Observed equations mapping wrapper output to derivative/output variables
+        me_observed = Equation[]
+        for (i, var) in enumerate([dervars; outputs])
+            push!(me_observed, var ~ call_expr[i])
+        end
+
+        # Lifecycle callback: finalize deallocates the FMU instance
+        finalize_affect = MTK.ImperativeAffect(fmiFinalize!; observed = (; wrapper = wrapper_param))
+        step_affect = MTK.ImperativeAffect(Returns((;)))
+        lifecycle_cb = MTK.SymbolicDiscreteCallback(
+            (t == t - 1), step_affect; finalize = finalize_affect,
+            reinitializealg = SciMLBase.NoInit()
+        )
+
+        all_observed = [observed; der_observed; me_observed]
+        all_params = SymT[SymT.(MTK.unwrap.(params)); MTK.unwrap(wrapper_param)]
+        disc_events = Any[lifecycle_cb]
+
+        return MTK.FMUSystem{Mode}(;
+            name = name,
+            iv = t,
+            states = SymT.(MTK.unwrap.(diffvars)),
+            derivatives = SymT.(MTK.unwrap.(dervars)),
+            inputs = SymT.(MTK.unwrap.(inputs)),
+            outputs = SymT.(MTK.unwrap.(outputs)),
+            parameters = all_params,
+            observed = all_observed,
+            wrapper = wrapper_obj,
+            capabilities = caps,
+            value_references = vr_dict,
+            default_values = default_dict,
+            communication_step_size = nothing,
+            discrete_events = disc_events,
+        )
+    elseif type == :CS
+        # CS FMUs: for now, just construct without stepping callbacks
+        # (CS support will be added later)
+        all_observed = observed
+        all_params = SymT[SymT.(MTK.unwrap.(params)); MTK.unwrap(wrapper_param)]
+
+        return MTK.FMUSystem{Mode}(;
+            name = name,
+            iv = t,
+            states = SymT.(MTK.unwrap.(diffvars)),
+            derivatives = SymT[],
+            inputs = SymT.(MTK.unwrap.(inputs)),
+            outputs = SymT.(MTK.unwrap.(outputs)),
+            parameters = all_params,
+            observed = all_observed,
+            wrapper = wrapper_obj,
+            capabilities = caps,
+            value_references = vr_dict,
+            default_values = default_dict,
+            communication_step_size = Float64(communication_step_size),
+        )
+    end
 end
 
 """
@@ -447,6 +500,14 @@ end
 
 Base.nameof(::FMI2InstanceWrapper) = :FMI2InstanceWrapper
 
+@register_array_symbolic (fn::FMI2InstanceWrapper)(
+    states::Vector{<:Real}, inputs::Vector{<:Real}, params::Vector{<:Real}, t::Real
+) begin
+    size = (length(states) + length(fn.output_value_references),)
+    eltype = eltype(states)
+    ndims = 1
+end
+
 """
     $(TYPEDSIGNATURES)
 
@@ -605,6 +666,43 @@ function FMI3InstanceWrapper(fmu, ders, states, outputs, params, inputs)
 end
 
 Base.nameof(::FMI3InstanceWrapper) = :FMI3InstanceWrapper
+
+@register_array_symbolic (fn::FMI3InstanceWrapper)(
+    states::Vector{<:Real}, inputs::Vector{<:Real}, params::Vector{<:Real}, t::Real
+) begin
+    size = (length(states) + length(fn.output_value_references),)
+    eltype = eltype(states)
+    ndims = 1
+end
+
+"""
+    $(TYPEDSIGNATURES)
+
+Call the FMU wrapper to compute derivatives and outputs. The wrapper is made callable
+so that it can be used as a symbolic registered function via `@register_array_symbolic`.
+Returns a buffer containing `[derivatives..., outputs...]`.
+"""
+function (wrapper::Union{FMI2InstanceWrapper, FMI3InstanceWrapper})(
+        states, inputs, params, t
+    )
+    instance = get_instance_ME!(wrapper, inputs, params, t)
+
+    states_buffer = wrapper.states_buffer
+    outputs_buffer = wrapper.outputs_buffer
+    @assert length(states_buffer) == length(states)
+    instance(;
+        x = states, u = inputs, u_refs = wrapper.input_value_references,
+        p = params, p_refs = wrapper.param_value_references, t = t
+    )
+    partiallyCompleteIntegratorStep(wrapper)
+    instance(;
+        dx = states_buffer, dx_refs = wrapper.derivative_value_references,
+        y = outputs_buffer, y_refs = wrapper.output_value_references
+    )
+    wrapper.res_buffer[1:length(states_buffer)] .= states_buffer
+    wrapper.res_buffer[length(states_buffer)+1:end] .= outputs_buffer
+    return wrapper.res_buffer
+end
 
 """
     $(TYPEDSIGNATURES)
