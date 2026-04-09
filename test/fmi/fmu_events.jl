@@ -62,6 +62,35 @@ if isdir(REF_FMU_DIR)
         @test length(sol.t) > 10  # should take multiple steps
     end
 
+    @testset "BouncingBall (event indicators)" begin
+        fmu = FMI.loadFMU(joinpath(REF_FMU_DIR, "BouncingBall.fmu"); type = :ME)
+        fmu_sys = MTK.FMIComponent(Val(3); fmu, type = :ME, name = :bb)
+
+        @test fmu_sys isa MTKBase.FMUSystem{MTKBase.ModelExchange}
+        @test MTKBase.get_fmu_capabilities(fmu_sys).n_event_indicators == 1
+
+        parent = System(Equation[], t; systems = [fmu_sys], name = :sys)
+        compiled = mtkcompile(parent)
+
+        prob = ODEProblem{true, SciMLBase.FullSpecialize}(
+            compiled,
+            [compiled.bb.h => 1.0, compiled.bb.v => 0.0],
+            (0.0, 5.0);
+            build_initializeprob = false
+        )
+        sol = solve(prob, Tsit5(); reltol = 1e-8, abstol = 1e-8)
+        @test SciMLBase.successful_retcode(sol)
+
+        # Height should never go significantly below zero (bouncing)
+        h_vals = sol[compiled.bb.h]
+        @test all(h -> h >= -0.01, h_vals)
+
+        # Ball should have bounced (velocity changed sign at least once)
+        v_vals = sol[compiled.bb.v]
+        sign_changes = count(i -> v_vals[i] * v_vals[i+1] < 0, 1:length(v_vals)-1)
+        @test sign_changes >= 2
+    end
+
     # TODO: Composed MTK+FMU test (FMU variables referenced in MTK equations
     # need additional integration work — the variable reference fmu.x is not
     # available during the symbolic compilation pass before FMU merge)

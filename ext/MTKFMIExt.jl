@@ -248,6 +248,11 @@ function MTK.FMIComponent(
 
         all_observed = [observed; der_observed; me_observed]
         all_params = SymT[MTK.unwrap.(params); MTK.unwrap(wrapper_param)]
+        cont_events = Any[]
+        if caps.n_event_indicators > 0
+            event_cb = MTK.FMUContinuousCallback(wrapper_obj, caps.n_event_indicators)
+            push!(cont_events, event_cb)
+        end
         disc_events = Any[lifecycle_cb]
 
         return MTK.FMUSystem{Mode}(;
@@ -264,6 +269,7 @@ function MTK.FMIComponent(
             value_references = vr_dict,
             default_values = default_dict,
             communication_step_size = nothing,
+            continuous_events = cont_events,
             discrete_events = disc_events,
         )
     elseif type == :CS
@@ -823,7 +829,7 @@ function partiallyCompleteIntegratorStep(wrapper::FMI3InstanceWrapper)
     @statuscheck FMI.fmi3CompletedIntegratorStep!(
         wrapper.instance, FMI.fmi3False, enterEventMode, terminateSimulation
     )
-    @assert enterEventMode[] == FMI.fmi3False
+    # Event mode entry is handled by VectorContinuousCallback, not here
     return @assert terminateSimulation[] == FMI.fmi3False
 end
 
@@ -1086,6 +1092,79 @@ function MTK.fmu_read_outputs!(wrapper::FMI3InstanceWrapper, integrator)
             instance, wrapper.output_value_references, wrapper.outputs_buffer
         )
     end
+end
+
+# --- FMI Event Operations (used by lower_fmu_continuous_callback) ---
+
+function MTK.fmu_get_event_indicators!(wrapper::FMI3InstanceWrapper, out, u, t)
+    instance = wrapper.instance
+    instance === nothing && error("FMU instance not initialized for event indicators")
+    @statuscheck FMI.fmi3SetTime(instance, t)
+    if !isempty(u)
+        @statuscheck FMI.fmi3SetContinuousStates(instance, collect(u))
+    end
+    @statuscheck FMI.fmi3GetEventIndicators!(instance, out)
+    return nothing
+end
+
+function MTK.fmu_get_event_indicators!(wrapper::FMI2InstanceWrapper, out, u, t)
+    instance = wrapper.instance
+    instance === nothing && error("FMU instance not initialized for event indicators")
+    @statuscheck FMI.fmi2SetTime(instance, t)
+    if !isempty(u)
+        @statuscheck FMI.fmi2SetContinuousStates(instance, collect(u))
+    end
+    @statuscheck FMI.fmi2GetEventIndicators!(instance, out)
+    return nothing
+end
+
+function MTK.fmu_enter_event_mode!(wrapper::FMI3InstanceWrapper)
+    @statuscheck FMI.fmi3EnterEventMode(wrapper.instance)
+end
+
+function MTK.fmu_enter_event_mode!(wrapper::FMI2InstanceWrapper)
+    @statuscheck FMI.fmi2EnterEventMode(wrapper.instance)
+end
+
+function MTK.fmu_update_discrete_states!(wrapper::FMI3InstanceWrapper)
+    result = FMI.fmi3UpdateDiscreteStates(wrapper.instance)
+    # FMI3 returns a tuple: (newDiscreteStatesNeeded, terminateSimulation,
+    #   nominalsOfContinuousStatesChanged, valuesOfContinuousStatesChanged,
+    #   nextEventTimeDefined, nextEventTime)
+    return (
+        newDiscreteStatesNeeded = result[1] != FMI.fmi3False,
+        terminateSimulation = result[2] != FMI.fmi3False,
+        valuesOfContinuousStatesChanged = result[4] != FMI.fmi3False,
+        nextEventTimeDefined = result[5] != FMI.fmi3False,
+        nextEventTime = result[6]
+    )
+end
+
+function MTK.fmu_update_discrete_states!(wrapper::FMI2InstanceWrapper)
+    eventInfo = FMI.fmi2NewDiscreteStates(wrapper.instance)
+    return (
+        newDiscreteStatesNeeded = eventInfo.newDiscreteStatesNeeded != FMI.fmi2False,
+        terminateSimulation = eventInfo.terminateSimulation != FMI.fmi2False,
+        valuesOfContinuousStatesChanged = eventInfo.valuesOfContinuousStatesChanged != FMI.fmi2False,
+        nextEventTimeDefined = eventInfo.nextEventTimeDefined != FMI.fmi2False,
+        nextEventTime = eventInfo.nextEventTime
+    )
+end
+
+function MTK.fmu_get_continuous_states!(wrapper::FMI3InstanceWrapper, u)
+    @statuscheck FMI.fmi3GetContinuousStates!(wrapper.instance, u)
+end
+
+function MTK.fmu_get_continuous_states!(wrapper::FMI2InstanceWrapper, u)
+    @statuscheck FMI.fmi2GetContinuousStates!(wrapper.instance, u)
+end
+
+function MTK.fmu_enter_continuous_time_mode!(wrapper::FMI3InstanceWrapper)
+    @statuscheck FMI.fmi3EnterContinuousTimeMode(wrapper.instance)
+end
+
+function MTK.fmu_enter_continuous_time_mode!(wrapper::FMI2InstanceWrapper)
+    @statuscheck FMI.fmi2EnterContinuousTimeMode(wrapper.instance)
 end
 
 end # module
