@@ -108,6 +108,22 @@ if isdir(REF_FMU_DIR)
         @test SciMLBase.successful_retcode(sol2)
     end
 
+    @testset "AD-safe initialization (no build_initializeprob=false)" begin
+        fmu = FMI.loadFMU(joinpath(REF_FMU_DIR, "Dahlquist.fmu"); type = :ME)
+        fmu_sys = MTK.FMIComponent(Val(3); fmu, type = :ME, name = :dahlquist)
+
+        parent = System(Equation[], t; systems = [fmu_sys], name = :sys)
+        compiled = mtkcompile(parent)
+
+        # Should work WITHOUT build_initializeprob=false
+        prob = ODEProblem{true, SciMLBase.FullSpecialize}(
+            compiled, [compiled.dahlquist.x => 1.0], (0.0, 1.0)
+        )
+        sol = solve(prob, Tsit5(); reltol = 1e-8, abstol = 1e-8)
+        @test SciMLBase.successful_retcode(sol)
+        @test sol[end, end] ≈ exp(-1.0) atol = 1e-6
+    end
+
     @testset "Composed MTK+FMU equations" begin
         fmu = FMI.loadFMU(joinpath(REF_FMU_DIR, "Dahlquist.fmu"); type = :ME)
         fmu_sys = MTK.FMIComponent(Val(3); fmu, type = :ME, name = :fmu)

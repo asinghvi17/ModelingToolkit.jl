@@ -130,6 +130,23 @@ function merge_fmu_data(compiled_sys, fmu_data, fmu_subsystems)
         @set! compiled_sys.initial_conditions = MTKBase.AtomicArrayDict(ic)
     end
 
+    # Add initialization equations pinning FMU states to defaults (AD-safe init)
+    new_init_eqs = copy(get_initialization_eqs(compiled_sys))
+    for fmu in fmu_subsystems
+        if fmu isa FMUSystem{ModelExchange}
+            fmu_defaults = get_default_values(fmu)
+            for state in get_unknowns(fmu)
+                ns_state = renamespace(fmu, state)
+                if haskey(fmu_defaults, state)
+                    push!(new_init_eqs, ns_state ~ fmu_defaults[state])
+                end
+            end
+        end
+    end
+    if length(new_init_eqs) != length(get_initialization_eqs(compiled_sys))
+        @set! compiled_sys.initialization_eqs = new_init_eqs
+    end
+
     return compiled_sys
 end
 
