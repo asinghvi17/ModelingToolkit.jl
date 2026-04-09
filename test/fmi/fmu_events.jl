@@ -91,10 +91,6 @@ if isdir(REF_FMU_DIR)
         @test sign_changes >= 2
     end
 
-    # TODO: Composed MTK+FMU test (FMU variables referenced in MTK equations
-    # need additional integration work — the variable reference fmu.x is not
-    # available during the symbolic compilation pass before FMU merge)
-
     @testset "Multiple FMU subsystems" begin
         fmu = FMI.loadFMU(joinpath(REF_FMU_DIR, "Dahlquist.fmu"); type = :ME)
         fmu1 = MTK.FMIComponent(Val(3); fmu, type = :ME, name = :fmu1)
