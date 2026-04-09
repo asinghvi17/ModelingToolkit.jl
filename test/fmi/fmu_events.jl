@@ -107,6 +107,31 @@ if isdir(REF_FMU_DIR)
         sol2 = solve(prob, Tsit5())
         @test SciMLBase.successful_retcode(sol2)
     end
+
+    @testset "Composed MTK+FMU equations" begin
+        fmu = FMI.loadFMU(joinpath(REF_FMU_DIR, "Dahlquist.fmu"); type = :ME)
+        fmu_sys = MTK.FMIComponent(Val(3); fmu, type = :ME, name = :fmu)
+
+        @variables y(t)
+        eqs = [D(y) ~ -y + fmu_sys.x]
+        parent = System(eqs, t; systems = [fmu_sys], name = :sys)
+        compiled = mtkcompile(parent)
+
+        @test length(unknowns(compiled)) == 2  # y and fmu.x
+
+        prob = ODEProblem{true, SciMLBase.FullSpecialize}(
+            compiled,
+            [compiled.y => 0.0, compiled.fmu.x => 1.0],
+            (0.0, 1.0);
+            build_initializeprob = false
+        )
+        sol = solve(prob, Tsit5(); reltol = 1e-8, abstol = 1e-8)
+        @test SciMLBase.successful_retcode(sol)
+
+        # fmu.x decays as exp(-t), y is driven by it
+        # fmu.x(1) ≈ exp(-1)
+        @test sol[compiled.fmu.x][end] ≈ exp(-1.0) atol = 1e-6
+    end
 end
 
 else

@@ -32,6 +32,12 @@ function MTKBase.__mtkcompile(
     fmu_subsystems, sys = extract_fmu_subsystems(sys)
     fmu_data = isempty(fmu_subsystems) ? nothing : collect_fmu_variables(sys, fmu_subsystems)
 
+    # Inject FMU states as temporary parameters so MTK equations can reference them
+    if fmu_data !== nothing
+        existing_ps = get_ps(sys)
+        sys = Setfield.@set sys.ps = vcat(existing_ps, fmu_data.unknowns)
+    end
+
     sys, statemachines = extract_top_level_statemachines(sys)
     sys, source_info = expand_connections(sys, Val(true))
     state = TearingState(sys, source_info; sort_eqs)

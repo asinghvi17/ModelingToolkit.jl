@@ -80,7 +80,10 @@ end
 Merge FMU symbolic variables and events into the compiled system.
 """
 function merge_fmu_data(compiled_sys, fmu_data, fmu_subsystems)
-    new_ps = vcat(get_ps(compiled_sys), fmu_data.parameters)
+    # Filter out FMU states that were temporarily injected as parameters
+    fmu_state_set = Set(fmu_data.unknowns)
+    compiled_ps = filter(p -> p ∉ fmu_state_set, get_ps(compiled_sys))
+    new_ps = vcat(compiled_ps, fmu_data.parameters)
     new_observed = vcat(get_observed(compiled_sys), fmu_data.observed)
     new_unknowns = copy(get_unknowns(compiled_sys))
     new_eqs = copy(get_eqs(compiled_sys))
