@@ -1521,11 +1521,20 @@ Returns `nothing` if `sys` has no events and `callback` is `nothing`.
 # See also
 [`generate_continuous_callbacks`](@ref), [`generate_discrete_callbacks`](@ref)
 """
+
+"""Metadata key for storing pre-lowered SciML callbacks on the compiled system."""
+struct RawCallbacksKey end
+
 function process_events(sys; callback = nothing, tspan = nothing, kwargs...)
     contin_cbs = generate_continuous_callbacks(sys; kwargs...)
     discrete_cbs = generate_discrete_callbacks(sys; tspan, kwargs...)
     cb = merge_cb(contin_cbs, callback)
-    return (discrete_cbs === nothing) ? cb : CallbackSet(contin_cbs, discrete_cbs...)
+    # Merge pre-lowered raw callbacks (e.g., from FMU subsystems)
+    if SU.hasmetadata(sys, RawCallbacksKey)
+        raw_cbs = SU.getmetadata(sys, RawCallbacksKey, nothing)
+        cb = merge_cb(cb, raw_cbs)
+    end
+    return (discrete_cbs === nothing) ? cb : CallbackSet(cb, discrete_cbs...)
 end
 
 """

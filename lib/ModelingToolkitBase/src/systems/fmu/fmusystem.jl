@@ -273,6 +273,12 @@ get_parameter_bindings_graph(::AbstractFMUSystem) = nothing
 get_costs(::AbstractFMUSystem) = SymbolicT[]
 get_consolidate(::AbstractFMUSystem) = nothing
 
+# FMU callback types don't have symbolic variables to namespace — pass through as-is
+namespace_callback(cb::FMUContinuousCallback, s) = cb
+namespace_callback(cb::FMUTimeCallback, s) = cb
+namespace_callback(cb::FMUStepCallback, s) = cb
+namespace_callback(cb::FMUStepEventCallback, s) = cb
+
 # ---- FMU-specific accessors ----
 
 """Get the FMU wrapper object."""

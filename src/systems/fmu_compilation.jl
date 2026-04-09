@@ -103,24 +103,43 @@ function merge_fmu_data(compiled_sys, fmu_data, fmu_subsystems)
         end
     end
 
-    fmu_metadata = Base.ImmutableDict(get_metadata(compiled_sys),
-        FMUSubsystemsKey => fmu_subsystems)
-
     @set! compiled_sys.eqs = new_eqs
     @set! compiled_sys.unknowns = new_unknowns
     @set! compiled_sys.ps = new_ps
     @set! compiled_sys.observed = new_observed
 
-    # Merge FMU events into compiled system
-    if !isempty(fmu_data.continuous_events)
-        new_cont = vcat(get_continuous_events(compiled_sys), fmu_data.continuous_events)
-        @set! compiled_sys.continuous_events = new_cont
+    # Separate FMU opaque callbacks from symbolic callbacks, then lower opaque ones
+    lowered_cbs = Any[]
+    symbolic_disc = Any[]
+    for cb in fmu_data.discrete_events
+        if cb isa FMUStepCallback
+            push!(lowered_cbs, lower_fmu_step_callback(cb))
+        else
+            push!(symbolic_disc, cb)
+        end
     end
-    if !isempty(fmu_data.discrete_events)
-        new_disc = vcat(get_discrete_events(compiled_sys), fmu_data.discrete_events)
+    for cb in fmu_data.continuous_events
+        if cb isa FMUContinuousCallback
+            push!(lowered_cbs, lower_fmu_continuous_callback(cb))
+        else
+            push!(symbolic_disc, cb)  # SymbolicContinuousCallback passes through
+        end
+    end
+
+    # Merge symbolic discrete events (e.g., lifecycle callbacks) into the system
+    if !isempty(symbolic_disc)
+        new_disc = vcat(get_discrete_events(compiled_sys), symbolic_disc)
         @set! compiled_sys.discrete_events = new_disc
     end
 
+    fmu_metadata = Base.ImmutableDict(get_metadata(compiled_sys),
+        FMUSubsystemsKey => fmu_subsystems)
+    if !isempty(lowered_cbs)
+        raw_cb_set = length(lowered_cbs) == 1 ? lowered_cbs[1] :
+                     SciMLBase.CallbackSet(lowered_cbs...)
+        fmu_metadata = Base.ImmutableDict(fmu_metadata,
+            MTKBase.RawCallbacksKey => raw_cb_set)
+    end
     @set! compiled_sys.metadata = fmu_metadata
 
     # Merge FMU defaults into compiled system's initial_conditions
