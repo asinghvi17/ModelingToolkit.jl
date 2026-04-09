@@ -184,6 +184,7 @@ include("utils.jl")
 include("systems/index_cache.jl")
 include("systems/parameter_buffer.jl")
 include("systems/abstractsystem.jl")
+include("systems/fmu/types.jl")
 include("systems/connectiongraph.jl")
 include("systems/connectors.jl")
 include("systems/imperative_affect.jl")
@@ -332,6 +333,10 @@ export MissingGuessValue
 export MiscSystemData
 
 export AssignmentAffect
+
+export FMUMode, ModelExchange, CoSimulation, ME, CS,
+    FMUCapabilities, AbstractFMUSystem,
+    FMUContinuousCallback, FMUTimeCallback, FMUStepCallback, FMUStepEventCallback
 
 const set_scalar_metadata = setmetadata
 
