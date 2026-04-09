@@ -9,11 +9,15 @@ import ModelingToolkit as MTK
 import ModelingToolkitBase as MTKBase
 import FMI
 
-const REF_FMU_DIR = joinpath(@__DIR__, "..", "..", "..", "Reference-FMUs",
-    "build", "fmi3-aarch64-darwin", "install")
+if !haskey(ENV, "REFERENCE_FMUS_DIR")
+    @info "Skipping Reference FMU tests: REFERENCE_FMUS_DIR not set"
+else
 
-# Only run if Reference FMUs are available
-if isdir(REF_FMU_DIR)
+const REF_FMU_DIR = ENV["REFERENCE_FMUS_DIR"]
+
+if !isdir(REF_FMU_DIR)
+    @info "Skipping Reference FMU tests: directory not found at $REF_FMU_DIR"
+else
 
 @testset "FMU Pipeline - Reference FMUs" begin
     @testset "Dahlquist (dx/dt = -kx)" begin
@@ -194,6 +198,5 @@ if isdir(REF_FMU_DIR)
     end
 end
 
-else
-    @info "Skipping Reference FMU tests: directory not found at $REF_FMU_DIR"
-end
+end # isdir
+end # haskey

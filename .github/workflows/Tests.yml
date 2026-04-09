@@ -59,10 +59,17 @@ jobs:
         if: ${{ vars.USE_SELF_HOSTED != 'true' }}
         with:
           token: "${{ secrets.GITHUB_TOKEN }}"
+      - name: "Download Reference FMUs"
+        if: contains(matrix.pkggroup, 'FMI')
+        run: |
+          curl -sL "https://github.com/modelica/Reference-FMUs/releases/download/v0.0.39/Reference-FMUs-0.0.39.zip" -o /tmp/ref-fmus.zip
+          mkdir -p Reference-FMUs/3.0
+          unzip -o /tmp/ref-fmus.zip "3.0/*" -d Reference-FMUs
       - name: "Test ${{ matrix.pkggroup }}"
         env:
           PKGGROUP: ${{ matrix.pkggroup }}
           JULIA_PKG_PRECOMPILE_AUTO: 0
+          REFERENCE_FMUS_DIR: ${{ contains(matrix.pkggroup, 'FMI') && format('{0}/Reference-FMUs/3.0', github.workspace) || '' }}
         shell: julia --color=yes --check-bounds=yes --depwarn=yes {0}
         run: |
           using Pkg
