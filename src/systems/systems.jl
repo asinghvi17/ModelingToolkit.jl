@@ -28,6 +28,10 @@ function MTKBase.__mtkcompile(
         sort_eqs = true,
         kwargs...
     )
+    # Extract FMU subsystems — they bypass symbolic manipulation
+    fmu_subsystems, sys = extract_fmu_subsystems(sys)
+    fmu_data = isempty(fmu_subsystems) ? nothing : collect_fmu_variables(sys, fmu_subsystems)
+
     sys, statemachines = extract_top_level_statemachines(sys)
     sys, source_info = expand_connections(sys, Val(true))
     state = TearingState(sys, source_info; sort_eqs)
@@ -46,9 +50,13 @@ function MTKBase.__mtkcompile(
         end
     end
     if isempty(brown_vars)
-        return mtkcompile!(
+        compiled_sys = mtkcompile!(
             state; inputs, outputs, disturbance_inputs, kwargs...
         )
+        if fmu_data !== nothing
+            compiled_sys = merge_fmu_data(compiled_sys, fmu_data, fmu_subsystems)
+        end
+        return compiled_sys
     else
         Is = Int[]
         Js = Int[]

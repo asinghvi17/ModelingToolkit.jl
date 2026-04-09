@@ -1,0 +1,106 @@
+# src/systems/fmu_compilation.jl
+
+"""
+    extract_fmu_subsystems(sys)
+
+Walk the system hierarchy and separate FMU subsystems from regular subsystems.
+Returns `(fmu_subsystems, sys_without_fmus)` where:
+- `fmu_subsystems` is a vector of `AbstractFMUSystem`
+- `sys_without_fmus` is the system with FMU subsystems removed
+"""
+function extract_fmu_subsystems(sys)
+    subsystems = get_systems(sys)
+    fmu_subsystems = AbstractFMUSystem[]
+    regular_subsystems = AbstractSystem[]
+
+    for s in subsystems
+        if s isa AbstractFMUSystem
+            push!(fmu_subsystems, s)
+        else
+            push!(regular_subsystems, s)
+        end
+    end
+
+    if !isempty(fmu_subsystems)
+        sys = Setfield.@set sys.systems = regular_subsystems
+    end
+
+    return fmu_subsystems, sys
+end
+
+"""
+    collect_fmu_variables(sys, fmu_subsystems)
+
+Namespace and collect symbolic variables from FMU subsystems into vectors that
+can be merged into the parent system's compilation.
+"""
+function collect_fmu_variables(sys, fmu_subsystems)
+    fmu_unknowns = SymbolicT[]
+    fmu_parameters = SymbolicT[]
+    fmu_observed = Equation[]
+    fmu_continuous_events = []
+    fmu_discrete_events = []
+
+    for fmu in fmu_subsystems
+        for v in get_unknowns(fmu)
+            push!(fmu_unknowns, renamespace(fmu, v))
+        end
+        for p in get_ps(fmu)
+            push!(fmu_parameters, renamespace(fmu, p))
+        end
+        for eq in get_observed(fmu)
+            push!(fmu_observed, namespace_equation(eq, fmu))
+        end
+        append!(fmu_continuous_events, get_continuous_events(fmu))
+        append!(fmu_discrete_events, get_discrete_events(fmu))
+    end
+
+    return (;
+        unknowns = fmu_unknowns,
+        parameters = fmu_parameters,
+        observed = fmu_observed,
+        continuous_events = fmu_continuous_events,
+        discrete_events = fmu_discrete_events
+    )
+end
+
+"""
+    merge_fmu_data(compiled_sys, fmu_data, fmu_subsystems)
+
+Merge FMU symbolic variables and events into the compiled system.
+"""
+function merge_fmu_data(compiled_sys, fmu_data, fmu_subsystems)
+    new_ps = vcat(get_ps(compiled_sys), fmu_data.parameters)
+    new_observed = vcat(get_observed(compiled_sys), fmu_data.observed)
+    new_unknowns = copy(get_unknowns(compiled_sys))
+    new_eqs = copy(get_eqs(compiled_sys))
+
+    for fmu in fmu_subsystems
+        if fmu isa FMUSystem{ModelExchange}
+            for (state, deriv) in zip(get_unknowns(fmu), get_derivatives(fmu))
+                ns_state = renamespace(fmu, state)
+                ns_deriv = renamespace(fmu, deriv)
+                push!(new_unknowns, ns_state)
+                push!(new_eqs, Differential(get_iv(compiled_sys))(ns_state) ~ ns_deriv)
+            end
+        elseif fmu isa FMUSystem{CoSimulation}
+            for state in get_unknowns(fmu)
+                push!(new_ps, renamespace(fmu, state))
+            end
+        end
+    end
+
+    fmu_metadata = Base.ImmutableDict(get_metadata(compiled_sys),
+        FMUSubsystemsKey => fmu_subsystems)
+
+    @set! compiled_sys.eqs = new_eqs
+    @set! compiled_sys.unknowns = new_unknowns
+    @set! compiled_sys.ps = new_ps
+    @set! compiled_sys.observed = new_observed
+    @set! compiled_sys.metadata = fmu_metadata
+
+    return compiled_sys
+end
+
+"""Metadata key for storing FMU subsystem references on the compiled system."""
+struct FMUSubsystemsKey end
