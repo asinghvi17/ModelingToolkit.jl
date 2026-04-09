@@ -124,6 +124,25 @@ if isdir(REF_FMU_DIR)
         @test sol[end, end] ≈ exp(-1.0) atol = 1e-6
     end
 
+    @testset "CoSimulation FMU (Dahlquist)" begin
+        fmu = FMI.loadFMU(joinpath(REF_FMU_DIR, "Dahlquist.fmu"); type = :CS)
+        fmu_sys = MTK.FMIComponent(Val(3); fmu, type = :CS,
+            communication_step_size = 0.01, name = :cs)
+
+        @test fmu_sys isa MTKBase.FMUSystem{MTKBase.CoSimulation}
+        @test MTKBase.get_communication_step_size(fmu_sys) == 0.01
+
+        parent = System(Equation[], t; systems = [fmu_sys], name = :sys)
+        compiled = mtkcompile(parent)
+
+        prob = ODEProblem{true, SciMLBase.FullSpecialize}(
+            compiled, [], (0.0, 1.0);
+            build_initializeprob = false
+        )
+        sol = solve(prob, Tsit5())
+        @test SciMLBase.successful_retcode(sol)
+    end
+
     @testset "Composed MTK+FMU equations" begin
         fmu = FMI.loadFMU(joinpath(REF_FMU_DIR, "Dahlquist.fmu"); type = :ME)
         fmu_sys = MTK.FMIComponent(Val(3); fmu, type = :ME, name = :fmu)

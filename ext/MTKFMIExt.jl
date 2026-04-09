@@ -267,10 +267,42 @@ function MTK.FMIComponent(
             discrete_events = disc_events,
         )
     elseif type == :CS
-        # CS FMUs: for now, just construct without stepping callbacks
-        # (CS support will be added later)
+        # CS FMU: periodic stepping via FMUStepCallback + lifecycle finalize
+        cs_functor = Ver == 2 ? FMI2CSFunctor(state_value_references, output_value_references) :
+                                FMI3CSFunctor(state_value_references, output_value_references)
+
+        # Build symbolic input vectors for CS
+        __mtk_internal_u = copy(diffvars)
+        __mtk_internal_x = isempty(inputs) ? Float64[] : copy(inputs)
+        __mtk_internal_p = isempty(params) ? Float64[] : copy(params)
+
+        # Initialize callback: fires once at start to instantiate the FMU
+        init_affect = MTK.ImperativeAffect(
+            fmiCSInitialize!;
+            observed = (; wrapper = wrapper_param, inputs = __mtk_internal_x,
+                         params = __mtk_internal_p, t = t),
+            modified = isempty(outputs) ?
+                (; states = __mtk_internal_u) :
+                (; states = __mtk_internal_u, outputs = outputs),
+            ctx = cs_functor
+        )
+
+        # Lifecycle finalize: deallocates the FMU instance at solve end
+        finalize_affect = MTK.ImperativeAffect(fmiFinalize!; observed = (; wrapper = wrapper_param))
+
+        # Step callback type for lowering to PeriodicCallback
+        step_cb = MTK.FMUStepCallback(wrapper_obj, Float64(communication_step_size))
+
+        # Lifecycle callback with init + finalize
+        lifecycle_cb = MTK.SymbolicDiscreteCallback(
+            (t == t - 1), MTK.ImperativeAffect(Returns((;)));
+            initialize = init_affect, finalize = finalize_affect,
+            reinitializealg = SciMLBase.NoInit()
+        )
+
         all_observed = observed
         all_params = SymT[MTK.unwrap.(params); MTK.unwrap(wrapper_param)]
+        disc_events = Any[lifecycle_cb, step_cb]
 
         return MTK.FMUSystem{Mode}(;
             name = name,
@@ -286,6 +318,7 @@ function MTK.FMIComponent(
             value_references = vr_dict,
             default_values = default_dict,
             communication_step_size = Float64(communication_step_size),
+            discrete_events = disc_events,
         )
     end
 end
@@ -1012,6 +1045,47 @@ function fmiCSStep!(m, o, ctx::FMI3CSFunctor, integrator)
     end
 
     return m
+end
+
+# --- FMI CoSimulation step operations ---
+
+function MTK.fmu_do_step!(wrapper::FMI2InstanceWrapper, t, dt)
+    instance = wrapper.instance
+    instance === nothing && error("FMU instance not initialized")
+    @statuscheck FMI.fmi2DoStep(instance, t, dt, FMI.fmi2True)
+end
+
+function MTK.fmu_do_step!(wrapper::FMI3InstanceWrapper, t, dt)
+    instance = wrapper.instance
+    instance === nothing && error("FMU instance not initialized")
+    eventEncountered = Ref(FMI.fmi3False)
+    terminateSimulation = Ref(FMI.fmi3False)
+    earlyReturn = Ref(FMI.fmi3False)
+    lastSuccessfulTime = Ref(zero(FMI.fmi3Float64))
+    @statuscheck FMI.fmi3DoStep!(
+        instance, t, dt, FMI.fmi3True, eventEncountered,
+        terminateSimulation, earlyReturn, lastSuccessfulTime
+    )
+end
+
+function MTK.fmu_read_outputs!(wrapper::FMI2InstanceWrapper, integrator)
+    instance = wrapper.instance
+    instance === nothing && return
+    if !isempty(wrapper.output_value_references)
+        @statuscheck FMI.fmi2GetReal!(
+            instance, wrapper.output_value_references, wrapper.outputs_buffer
+        )
+    end
+end
+
+function MTK.fmu_read_outputs!(wrapper::FMI3InstanceWrapper, integrator)
+    instance = wrapper.instance
+    instance === nothing && return
+    if !isempty(wrapper.output_value_references)
+        @statuscheck FMI.fmi3GetFloat64!(
+            instance, wrapper.output_value_references, wrapper.outputs_buffer
+        )
+    end
 end
 
 end # module
