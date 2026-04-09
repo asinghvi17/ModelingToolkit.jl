@@ -222,6 +222,9 @@ function MTK.FMIComponent(
         @parameters (wrapper_param::FMI3InstanceWrapper)(..)[1:buffer_length] = wrapper_obj
     end
 
+    # Add wrapper parameter default to defaults dict
+    default_dict[MTK.unwrap(wrapper_param)] = wrapper_obj
+
     if type == :ME
         # Build symbolic call expression
         __mtk_internal_u = copy(diffvars)
@@ -244,16 +247,16 @@ function MTK.FMIComponent(
         )
 
         all_observed = [observed; der_observed; me_observed]
-        all_params = SymT[SymT.(MTK.unwrap.(params)); MTK.unwrap(wrapper_param)]
+        all_params = SymT[MTK.unwrap.(params); MTK.unwrap(wrapper_param)]
         disc_events = Any[lifecycle_cb]
 
         return MTK.FMUSystem{Mode}(;
             name = name,
             iv = t,
-            states = SymT.(MTK.unwrap.(diffvars)),
-            derivatives = SymT.(MTK.unwrap.(dervars)),
-            inputs = SymT.(MTK.unwrap.(inputs)),
-            outputs = SymT.(MTK.unwrap.(outputs)),
+            states = Vector{SymT}(MTK.unwrap.(diffvars)),
+            derivatives = Vector{SymT}(MTK.unwrap.(dervars)),
+            inputs = Vector{SymT}(MTK.unwrap.(inputs)),
+            outputs = Vector{SymT}(MTK.unwrap.(outputs)),
             parameters = all_params,
             observed = all_observed,
             wrapper = wrapper_obj,
@@ -267,15 +270,15 @@ function MTK.FMIComponent(
         # CS FMUs: for now, just construct without stepping callbacks
         # (CS support will be added later)
         all_observed = observed
-        all_params = SymT[SymT.(MTK.unwrap.(params)); MTK.unwrap(wrapper_param)]
+        all_params = SymT[MTK.unwrap.(params); MTK.unwrap(wrapper_param)]
 
         return MTK.FMUSystem{Mode}(;
             name = name,
             iv = t,
-            states = SymT.(MTK.unwrap.(diffvars)),
+            states = Vector{SymT}(MTK.unwrap.(diffvars)),
             derivatives = SymT[],
-            inputs = SymT.(MTK.unwrap.(inputs)),
-            outputs = SymT.(MTK.unwrap.(outputs)),
+            inputs = Vector{SymT}(MTK.unwrap.(inputs)),
+            outputs = Vector{SymT}(MTK.unwrap.(outputs)),
             parameters = all_params,
             observed = all_observed,
             wrapper = wrapper_obj,
@@ -301,7 +304,7 @@ function _extract_capabilities(fmu, ver::Int)
         elseif md.modelExchange !== nothing && hasproperty(md.modelExchange, :canGetAndSetFMUstate)
             can_get_set = md.modelExchange.canGetAndSetFMUstate
         end
-        n_indicators = hasproperty(md, :numberOfEventIndicators) ? md.numberOfEventIndicators : 0
+        n_indicators = hasproperty(md, :numberOfEventIndicators) ? Int(md.numberOfEventIndicators) : 0
         MTK.FMUCapabilities(
             can_get_and_set_fmu_state = can_get_set,
             has_event_mode = false,
@@ -319,7 +322,7 @@ function _extract_capabilities(fmu, ver::Int)
         if md.coSimulation !== nothing && hasproperty(md.coSimulation, :hasEventMode)
             has_event = md.coSimulation.hasEventMode
         end
-        n_indicators = hasproperty(md, :numberOfEventIndicators) ? md.numberOfEventIndicators : 0
+        n_indicators = hasproperty(md, :numberOfEventIndicators) ? Int(md.numberOfEventIndicators) : 0
         MTK.FMUCapabilities(
             can_get_and_set_fmu_state = can_get_set,
             has_event_mode = has_event,

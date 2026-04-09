@@ -40,6 +40,7 @@ function collect_fmu_variables(sys, fmu_subsystems)
     fmu_observed = Equation[]
     fmu_continuous_events = []
     fmu_discrete_events = []
+    fmu_defaults = Dict{SymbolicT, Any}()
 
     for fmu in fmu_subsystems
         for v in get_unknowns(fmu)
@@ -57,6 +58,10 @@ function collect_fmu_variables(sys, fmu_subsystems)
         for cb in get_discrete_events(fmu)
             push!(fmu_discrete_events, namespace_callback(cb, fmu))
         end
+        # Collect defaults (parameter values, state initial conditions)
+        for (var, val) in get_default_values(fmu)
+            fmu_defaults[renamespace(fmu, var)] = val
+        end
     end
 
     return (;
@@ -64,7 +69,8 @@ function collect_fmu_variables(sys, fmu_subsystems)
         parameters = fmu_parameters,
         observed = fmu_observed,
         continuous_events = fmu_continuous_events,
-        discrete_events = fmu_discrete_events
+        discrete_events = fmu_discrete_events,
+        defaults = fmu_defaults
     )
 end
 
@@ -113,6 +119,13 @@ function merge_fmu_data(compiled_sys, fmu_data, fmu_subsystems)
     end
 
     @set! compiled_sys.metadata = fmu_metadata
+
+    # Merge FMU defaults into compiled system's initial_conditions
+    if !isempty(fmu_data.defaults)
+        ic = copy(initial_conditions(compiled_sys).dict)
+        merge!(ic, fmu_data.defaults)
+        @set! compiled_sys.initial_conditions = MTKBase.AtomicArrayDict(ic)
+    end
 
     return compiled_sys
 end
