@@ -111,3 +111,38 @@ using Symbolics: unwrap
         @test MTKBase.get_initialization_eqs(sys) == Equation[]
     end
 end
+
+@testset "System with FMUSystem subsystem" begin
+    using ModelingToolkit: t_nounits as t, D_nounits as D
+
+    iv = unwrap(t)
+    s1 = unwrap(only(@variables fmu_state(t)))
+    ds1 = unwrap(only(@variables fmu_der_state(t)))
+    p1 = unwrap(only(@parameters fmu_param))
+
+    caps = MTKBase.FMUCapabilities(
+        can_get_and_set_fmu_state = false,
+        n_event_indicators = 0,
+        fmi_version = 2
+    )
+
+    fmu_sys = MTKBase.FMUSystem{MTKBase.ModelExchange}(;
+        name = :fmu,
+        iv = iv,
+        states = [s1],
+        derivatives = [ds1],
+        inputs = typeof(s1)[],
+        outputs = typeof(s1)[],
+        parameters = [p1],
+        wrapper = :mock,
+        capabilities = caps,
+        value_references = Dict{typeof(s1), UInt32}(
+            s1 => UInt32(0), ds1 => UInt32(1), p1 => UInt32(2)),
+        default_values = Dict{typeof(s1), Any}()
+    )
+
+    @variables x(t) = 1.0
+    parent_sys = System([D(x) ~ x], t; systems = [fmu_sys], name = :parent)
+    @test length(MTKBase.get_systems(parent_sys)) == 1
+    @test MTKBase.get_systems(parent_sys)[1] isa MTKBase.AbstractFMUSystem
+end

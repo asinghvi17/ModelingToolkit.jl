@@ -35,7 +35,7 @@ structure.
 
 $(TYPEDFIELDS)
 """
-struct System <: IntermediateDeprecationSystem
+struct System{SubSys <: AbstractSystem} <: IntermediateDeprecationSystem
     """
     $INTERNAL_FIELD_WARNING
     A unique integer tag for the system.
@@ -159,7 +159,7 @@ struct System <: IntermediateDeprecationSystem
     """
     A list of subsystems of this system. Used for hierarchically building models.
     """
-    systems::Vector{System}
+    systems::Vector{SubSys}
     """
     Equations that must be satisfied during initialization of the numerical problem created
     from this system. For time-dependent systems, these equations are not valid after the
@@ -263,12 +263,12 @@ struct System <: IntermediateDeprecationSystem
     with the hierarchical structure. There may be multiple levels of `parent`s. The root
     parent is used for accessing variables via `getproperty` syntax.
     """
-    parent::Union{Nothing, System}
+    parent::Union{Nothing, AbstractSystem}
     """
     A custom initialization system to use if no initial conditions are provided for the
     unknowns or observables of this system.
     """
-    initializesystem::Union{Nothing, System}
+    initializesystem::Union{Nothing, AbstractSystem}
     """
     Whether the current system is an initialization system.
     """
@@ -312,6 +312,13 @@ struct System <: IntermediateDeprecationSystem
             irreducibles = AtomicSetT(), maybe_zeros = AtomicSetT(),
             isscheduled = false, schedule = nothing; checks::Union{Bool, Int} = true
         )
+        # Coerce systems vector to proper type for the type parameter
+        if !(systems isa Vector{<:AbstractSystem})
+            systems = collect(AbstractSystem, systems)
+        end
+        if all(s -> s isa System, systems) && !(systems isa Vector{System})
+            systems = Vector{System}(systems)
+        end
         if is_initializesystem && iv !== nothing
             throw(
                 ArgumentError(
@@ -363,7 +370,7 @@ struct System <: IntermediateDeprecationSystem
             end
             isempty(constraints) || check_units(u, constraints)
         end
-        return new(
+        return new{eltype(systems)}(
             tag, eqs, noise_eqs, jumps, constraints, costs,
             consolidate, unknowns, ps, brownians, poissonians, iv,
             observed, var_to_name, name, description, bindings, initial_conditions,
@@ -478,7 +485,10 @@ function System(
         initial_conditions = __legacy_defaults__
     end
 
-    if !(systems isa Vector{System})
+    if !(systems isa Vector{<:AbstractSystem})
+        systems = collect(AbstractSystem, systems)
+    end
+    if all(s -> s isa System, systems) && !(systems isa Vector{System})
         systems = Vector{System}(systems)
     end
     if !(eqs isa Vector{Equation})
@@ -1009,8 +1019,8 @@ differential equations.
 """
 is_dde(sys::AbstractSystem) = has_is_dde(sys) && get_is_dde(sys)
 
-_check_if_dde(eqs::Vector{Equation}, iv::Nothing, subsystems::Vector{System}) = false
-function _check_if_dde(eqs::Vector{Equation}, iv::SymbolicT, subsystems::Vector{System})
+_check_if_dde(eqs::Vector{Equation}, iv::Nothing, subsystems::Vector{<:AbstractSystem}) = false
+function _check_if_dde(eqs::Vector{Equation}, iv::SymbolicT, subsystems::Vector{<:AbstractSystem})
     any(ModelingToolkitBase.is_dde, subsystems) && return true
     pred = Base.Fix2(isdelay, iv)
     for eq in eqs
