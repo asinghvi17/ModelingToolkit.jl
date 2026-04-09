@@ -3,6 +3,7 @@ using ModelingToolkit
 using ModelingToolkit: t_nounits as t, D_nounits as D
 import ModelingToolkitBase as MTKBase
 using Symbolics: unwrap, SymbolicT
+using SciMLBase
 
 @testset "FMU Compilation Pass" begin
     @testset "extract_fmu_subsystems" begin
@@ -90,5 +91,37 @@ using Symbolics: unwrap, SymbolicT
 
     @testset "FMUSubsystemsKey struct exists" begin
         @test isdefined(ModelingToolkit, :FMUSubsystemsKey)
+    end
+end
+
+@testset "FMU Callback Lowering" begin
+    @testset "FMUContinuousCallback lowering" begin
+        wrapper = :mock
+        fmu_cb = MTKBase.FMUContinuousCallback(wrapper, 3)
+        cb = ModelingToolkit.lower_fmu_continuous_callback(fmu_cb)
+        @test cb isa SciMLBase.VectorContinuousCallback
+        @test cb.len == 3
+    end
+
+    @testset "FMUStepCallback lowering" begin
+        wrapper = :mock
+        fmu_cb = MTKBase.FMUStepCallback(wrapper, 0.01)
+        cb = ModelingToolkit.lower_fmu_step_callback(fmu_cb)
+        # PeriodicCallback returns a DiscreteCallback with a PeriodicCallbackAffect
+        @test cb isa SciMLBase.DiscreteCallback
+    end
+
+    @testset "FMUTimeCallback lowering" begin
+        wrapper = :mock
+        fmu_cb = MTKBase.FMUTimeCallback(wrapper)
+        cb = ModelingToolkit.lower_fmu_time_callback(fmu_cb)
+        @test cb isa SciMLBase.DiscreteCallback
+    end
+
+    @testset "FMUStepEventCallback lowering" begin
+        wrapper = :mock
+        fmu_cb = MTKBase.FMUStepEventCallback(wrapper)
+        cb = ModelingToolkit.lower_fmu_step_event_callback(fmu_cb)
+        @test cb isa SciMLBase.DiscreteCallback
     end
 end

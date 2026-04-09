@@ -146,6 +146,7 @@ using ModelingToolkitBase: COMMON_SENTINEL, COMMON_NOTHING, COMMON_MISSING,
     include("initialization.jl")
     include("systems/systems.jl")
     include("systems/fmu_compilation.jl")
+    include("systems/fmu_codegen.jl")
     include("systems/clock_inference.jl")
     include("systems/if_lifting.jl")
     include("systems/substitute_component.jl")
