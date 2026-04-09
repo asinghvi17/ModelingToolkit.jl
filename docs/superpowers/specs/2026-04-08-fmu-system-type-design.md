@@ -67,6 +67,19 @@ end
 
 ## FMU Callback Types
 
+> **Post-implementation note:** The four custom callback types below (`FMUContinuousCallback`,
+> `FMUTimeCallback`, `FMUStepCallback`, `FMUStepEventCallback`) still exist in `types.jl`
+> but are **currently unused**. During implementation, the lowering pipeline that would
+> convert these to SciML callbacks was dropped in favor of using standard
+> `SymbolicDiscreteCallback` with `ImperativeAffect` for lifecycle and stepping callbacks
+> (the same approach the old extension used). FMU callbacks are inherently non-symbolic —
+> routing them through a custom symbolic callback pipeline was over-engineered.
+>
+> These types may become useful later for FMI event indicator support (opaque zero-crossings
+> that cannot be expressed as symbolic equations), but are not part of the current pipeline.
+> The extension builds callbacks directly and passes them as `discrete_events` /
+> `continuous_events` keyword arguments to the `FMUSystem` constructor.
+
 These are stored on the `FMUSystem` and returned by `get_continuous_events` /
 `get_discrete_events`. They are lowered to standard SciML callbacks during `mtkcompile`.
 
@@ -98,6 +111,14 @@ end
 
 ## FMUSystem Fields
 
+> **Post-implementation note:** The constructor was simplified. Auto-callback creation
+> (from capabilities) was removed. The constructor now accepts `continuous_events` and
+> `discrete_events` as keyword arguments (default empty). The extension is responsible
+> for building appropriate callbacks (using `SymbolicDiscreteCallback` with
+> `ImperativeAffect`) and passing them in. The event field types were also generalized
+> to `Vector{Any}` to accept standard symbolic callbacks rather than the custom FMU
+> callback types.
+
 ```julia
 struct FMUSystem{Mode <: FMUMode, WrapperType, ValRefType} <: AbstractFMUSystem
     # Identity
@@ -118,11 +139,9 @@ struct FMUSystem{Mode <: FMUMode, WrapperType, ValRefType} <: AbstractFMUSystem
     value_references::Dict{Sym, ValRefType}    # symbolic var → FMI value reference
     default_values::Dict{Sym, Any}             # parameter/state defaults from FMU
 
-    # Events
-    continuous_events::Vector{FMUContinuousCallback{WrapperType}}
-    discrete_events::Vector{Union{FMUTimeCallback{WrapperType},
-                                  FMUStepCallback{WrapperType},
-                                  FMUStepEventCallback{WrapperType}}}
+    # Events (passed in by caller, not auto-generated)
+    continuous_events::Vector{Any}
+    discrete_events::Vector{Any}
 
     # CS-specific
     communication_step_size::Union{Float64, Nothing}  # nothing for ME
@@ -212,6 +231,14 @@ Validation happens at construction time, not at `mtkcompile` time.
 
 ### `FMUSystem{ME}` construction
 
+> **Post-implementation note:** Steps 9-11 (auto-creating FMU callback types) were removed
+> from the constructor. The extension now builds standard `SymbolicDiscreteCallback` with
+> `ImperativeAffect` for lifecycle management and passes them as `discrete_events`. The
+> extension also uses `@register_array_symbolic` on the wrapper type to create a symbolic
+> callable, stores it as a parameter, and builds observed equations
+> `deriv_var ~ wrapper(states, inputs, params, t)[i]` that get namespaced and merged
+> automatically by `collect_fmu_variables`/`merge_fmu_data`.
+
 1. Verify FMU declares Model Exchange support
 2. Extract `modelDescription.xml` metadata: states, derivatives, inputs, outputs, parameters
 3. Verify all state derivatives are provided
@@ -220,18 +247,22 @@ Validation happens at construction time, not at `mtkcompile` time.
 6. Extract `default_values` from FMU start values
 7. Extract capabilities (`canGetAndSetFMUstate`, `numberOfEventIndicators`, etc.)
 8. Build wrapper struct (do NOT instantiate the FMU instance — that happens at solve time)
-9. Create `FMUContinuousCallback` if `n_event_indicators > 0`
-10. Create `FMUStepEventCallback` (always — for `CompletedIntegratorStep`)
-11. Create `FMUTimeCallback` (always — time events are discovered at runtime)
+9. Build observed equations for derivatives via `@register_array_symbolic` wrapper callable
+10. Build lifecycle `SymbolicDiscreteCallback` with `ImperativeAffect`
+11. Pass events as `continuous_events`/`discrete_events` kwargs to `FMUSystem` constructor
 
 ### `FMUSystem{CS}` construction
+
+> **Post-implementation note:** CS FMU support is deferred. The extension creates an
+> `FMUSystem{CoSimulation}` but does not yet build stepping callbacks. Only the ME path
+> is fully implemented.
 
 Same as ME, plus:
 
 1. Verify FMU declares Co-Simulation support
 2. Require `communication_step_size` parameter
-3. Create `FMUStepCallback` with the step size
-4. For FMI 3.0 with `hasEventMode`: create `FMUContinuousCallback` if `n_event_indicators > 0`
+3. Create stepping callbacks and pass as `discrete_events`
+4. For FMI 3.0 with `hasEventMode`: create event indicator callbacks if `n_event_indicators > 0`
 5. Create states as discrete variables (not continuous)
 
 ## mtkcompile Compilation Pass
@@ -257,21 +288,41 @@ tearing, index reduction.
 2. **Collect symbolic variables** — states, parameters, observed (aliases) are namespaced
    and merged into the parent
 3. **Do NOT collect equations** — there are none
-4. **Collect events** — `FMUContinuousCallback`, `FMUTimeCallback`, etc. are collected
+4. **Collect and namespace events** — `continuous_events` and `discrete_events` from FMU
+   subsystems are namespaced via `namespace_callback` during collection, then merged into
+   the compiled system during `merge_fmu_data`
 5. **Mark FMU outputs as irreducible** — tearing cannot eliminate or substitute through them
 6. **FMU inputs become algebraic constraints** — satisfied by connection equations on the parent
 
+> **Post-implementation note:** The original `collect_fmu_variables` forgot to namespace
+> events. Since FMU subsystems are extracted before the symbolic pipeline, their events
+> need explicit namespacing. This was fixed to use `namespace_callback`. The
+> `merge_fmu_data` function was also updated to merge events into the compiled system
+> (the original implementation omitted this).
+
 ### Code generation: ME FMUs
+
+> **Post-implementation note:** The derivative evaluation approach changed. The plan
+> originally had `merge_fmu_data` create `D(state) ~ ns_deriv` where `ns_deriv` was an
+> undefined variable. The fix: the extension restores `@register_array_symbolic` for the
+> wrapper types, creates the wrapper as a symbolic callable parameter, and builds observed
+> equations `deriv_var ~ wrapper(states, inputs, params, t)[i]` on the `FMUSystem`. These
+> observed equations are namespaced and merged by `collect_fmu_variables`/`merge_fmu_data`
+> automatically. The `merge_fmu_data` function then creates `D(ns_state) ~ ns_deriv`
+> equations that reference the now-properly-defined namespaced derivative variables.
 
 **RHS contribution:**
 
 ```julia
-D(fmu₊state_i) ~ fmu_eval(fmu₊states, fmu₊inputs, fmu₊params, t)[i]
-fmu₊output_j  ~ fmu_eval(fmu₊states, fmu₊inputs, fmu₊params, t)[N_states + j]
+# Observed equations on FMUSystem (built by extension):
+fmu₊der_state_i ~ fmu₊wrapper_callable(fmu₊states, fmu₊inputs, fmu₊params, t)[i]
+
+# Derivative equations (built by merge_fmu_data):
+D(parent₊fmu₊state_i) ~ parent₊fmu₊der_state_i
 ```
 
-The `fmu_eval` callable is registered via `@register_array_symbolic` and stored in the
-compiled system's parameter vector.
+The wrapper callable is registered via `@register_array_symbolic` in the extension and
+stored as a symbolic parameter on the `FMUSystem`.
 
 **Event callbacks lowered to:**
 

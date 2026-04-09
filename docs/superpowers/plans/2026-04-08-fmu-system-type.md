@@ -1864,3 +1864,89 @@ developed in parallel. Task 7 depends on both 5 and 6. Task 8 depends on 7.
 6. **Step rejection** is the trickiest part. The wrapper needs mutable state for checkpoint
    tracking. The `DiscreteCallback` that handles step rejection must detect time regression
    (solver went back in time after rejection) and restore the FMU state appropriately.
+
+---
+
+## Post-Implementation Notes
+
+The following sections document divergences from the original plan that emerged during
+implementation. Reference commits: `ba01c9c1` through `d4b158a7`.
+
+### 1. Custom FMU callback types dropped from active pipeline
+
+**Plan said:** Tasks 1, 2, and 6 defined four custom callback types (`FMUContinuousCallback`,
+`FMUTimeCallback`, `FMUStepCallback`, `FMUStepEventCallback`) with a lowering pipeline in
+`fmu_codegen.jl` that converted them to standard SciML callbacks.
+
+**What happened:** The lowering pipeline was dropped. FMU callbacks are inherently
+non-symbolic (they wrap opaque FMI API calls), so routing them through a custom symbolic
+callback pipeline was over-engineered. Instead, the extension builds standard
+`SymbolicDiscreteCallback` with `ImperativeAffect` for lifecycle and stepping — the same
+approach the old extension used, which integrates naturally with the existing MTK callback
+infrastructure.
+
+The four custom types still exist in `types.jl` but are unused. They could be useful later
+for FMI event indicator support (opaque zero-crossings that cannot be expressed as symbolic
+equations). The `fmu_codegen.jl` stub functions are also unused.
+
+### 2. ME derivative evaluation uses symbolic wrapper callable
+
+**Plan said (Task 5, Step 7):** `merge_fmu_data` would create equations
+`D(ns_state) ~ ns_deriv` where `ns_deriv` was the namespaced derivative variable — but
+nothing defined what `ns_deriv` actually evaluates to.
+
+**What happened (commit `d4b158a7`):** The extension restores `@register_array_symbolic`
+for the wrapper types (`FMI2InstanceWrapper`, `FMI3InstanceWrapper`), creates the wrapper
+as a symbolic callable parameter on the `FMUSystem`, and builds observed equations:
+```julia
+deriv_var ~ wrapper_callable(states, inputs, params, t)[i]
+```
+These observed equations live on the `FMUSystem` and get namespaced/merged automatically
+by `collect_fmu_variables`/`merge_fmu_data`. The `merge_fmu_data` function then creates
+`D(ns_state) ~ ns_deriv` which now references properly-defined observed variables.
+
+### 3. FMUSystem constructor simplified
+
+**Plan said (Task 2, Step 3):** The constructor auto-populated event callbacks from
+`FMUCapabilities` (creating `FMUContinuousCallback` if `n_event_indicators > 0`,
+`FMUStepEventCallback` always for ME, etc.).
+
+**What happened (commit `d4b158a7`):** Auto-callback creation was removed from the
+constructor. It now accepts `continuous_events` and `discrete_events` as keyword arguments
+(default empty vectors). The extension is responsible for building appropriate callbacks
+and passing them in. This is cleaner because callback construction requires extension-specific
+knowledge (FMI API calls, wrapper references) that doesn't belong in the base type.
+
+### 4. merge_fmu_data now merges events
+
+**Plan said (Task 5, Step 7):** The `merge_fmu_data` function merged unknowns, parameters,
+observed, and equations — but did not merge events.
+
+**What happened (commit `d4b158a7`):** The function was updated to also merge
+`continuous_events` and `discrete_events` from FMU subsystems into the compiled system.
+Without this, FMU lifecycle callbacks were silently dropped.
+
+### 5. collect_fmu_variables now namespaces callbacks
+
+**Plan said (Task 5, Step 3):** The `collect_fmu_variables` function used bare `append!`
+for events, which did not namespace them.
+
+**What happened (commit `d4b158a7`):** Since FMU subsystems are extracted before the
+symbolic pipeline runs, their events need explicit namespacing. The collection was fixed
+to use `namespace_callback` so that callback variable references are properly scoped.
+
+### 6. CS FMU support deferred
+
+**Plan said (Task 7):** Both ME and CS paths would be fully implemented in the extension.
+
+**What happened:** The extension currently only fully implements the ME path. The CS path
+creates an `FMUSystem{CoSimulation}` but does not yet have stepping callbacks. This is
+deferred to a follow-up.
+
+### 7. Task 8 (integration tests) partially implemented
+
+**Plan said:** Full event handling and step rejection integration tests.
+
+**What happened (commit `a39af10f`):** Basic integration tests were added, but event
+indicator and step rejection tests are deferred pending access to suitable test FMUs
+(e.g., BouncingBall with event indicators).
