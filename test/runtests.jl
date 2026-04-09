@@ -97,8 +97,11 @@ end
     end
 
     if GROUP == "All" || GROUP == "FMI"
+        @safetestset "FMU System Unit Tests" include("fmi/fmusystem_unit.jl")
+        @safetestset "FMU Compilation Tests" include("fmi/fmu_compilation.jl")
         activate_fmi_env()
         @safetestset "FMI Extension Test" include("fmi/fmi.jl")
+        @safetestset "FMU Events Test" include("fmi/fmu_events.jl")
     end
 
     if GROUP == "All" || GROUP == "Extensions"
