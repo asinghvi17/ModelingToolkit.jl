@@ -12,6 +12,24 @@
 
 ---
 
+## Implementation Status
+
+All six tasks in this plan are complete. Implementation landed on the `as/fmicomponent` branch across the following commits:
+
+| Commit | Task | Summary |
+|--------|------|---------|
+| `86d853cd` | Task 1 | Composed MTK+FMU equations via temporary parameter injection |
+| `e151b40f` | Task 2 | AD-safe FMU initialization via state pinning equations |
+| `0453cd00` | Task 3 | Callback lowering infrastructure (`RawCallbacksKey`, `process_events`, `namespace_callback` no-ops) |
+| `328893cd` | Task 4 | CoSimulation FMU support with `ImperativeAffect` init + `FMUStepCallback` |
+| `b868bed0` | Task 5 | FMU event handling + BouncingBall (`FMUContinuousCallback` in ME path, FMI event op impls) |
+| `d9fd63fe` | Task 6 | Cleanup: removed the deferred composed-MTK+FMU TODO |
+| `66ddd02d` | CI     | Download Reference FMUs from the modelica/Reference-FMUs v0.0.39 release in CI |
+
+See the "Post-Implementation Notes" section at the end of this file for deviations from the original plan.
+
+---
+
 ## File Map
 
 | File | Action | Responsibility |
@@ -34,7 +52,7 @@ Inject FMU states as temporary parameters before `mtkcompile!` so MTK equations 
 - Modify: `src/systems/fmu_compilation.jl:82-131`
 - Modify: `test/fmi/fmu_events.jl`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test** _(commit 86d853cd)_
 
 Add this test to `test/fmi/fmu_events.jl`, inside the `"FMU Pipeline - Reference FMUs"` testset (after the "Repeated solve" testset, before the closing `end`):
 
@@ -65,7 +83,7 @@ Add this test to `test/fmi/fmu_events.jl`, inside the `"FMU Pipeline - Reference
 end
 ```
 
-- [ ] **Step 2: Inject FMU states as temporary parameters**
+- [x] **Step 2: Inject FMU states as temporary parameters** _(commit 86d853cd)_
 
 In `src/systems/systems.jl`, after line 33 (`fmu_data = ...`), add parameter injection:
 
@@ -79,7 +97,7 @@ In `src/systems/systems.jl`, after line 33 (`fmu_data = ...`), add parameter inj
 
 This goes right before line 35 (`sys, statemachines = extract_top_level_statemachines(sys)`).
 
-- [ ] **Step 3: Filter temporary parameters during merge**
+- [x] **Step 3: Filter temporary parameters during merge** _(commit 86d853cd)_
 
 In `src/systems/fmu_compilation.jl`, replace the `new_ps` line at the top of `merge_fmu_data` (line 83):
 
@@ -96,13 +114,13 @@ New:
     new_ps = vcat(compiled_ps, fmu_data.parameters)
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes** _(commit 86d853cd)_
 
 Run: `cd /Users/anshul/temp/ModelingToolkit.jl && julia --project -e 'using Pkg; Pkg.activate("test/fmi"); include("test/fmi/fmu_events.jl")'`
 
 The "Composed MTK+FMU equations" test should pass. The `fmu.x` variable should be resolvable during symbolic compilation and produce correct results.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit** _(commit 86d853cd)_
 
 ```bash
 git add src/systems/systems.jl src/systems/fmu_compilation.jl test/fmi/fmu_events.jl
@@ -119,7 +137,7 @@ Add initialization equations pinning FMU states to their defaults, so the initia
 - Modify: `src/systems/fmu_compilation.jl:82-131`
 - Modify: `test/fmi/fmu_events.jl`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test** _(commit e151b40f)_
 
 Add this test to `test/fmi/fmu_events.jl`, inside the `"FMU Pipeline - Reference FMUs"` testset:
 
@@ -141,7 +159,7 @@ Add this test to `test/fmi/fmu_events.jl`, inside the `"FMU Pipeline - Reference
 end
 ```
 
-- [ ] **Step 2: Add initialization equations in merge_fmu_data**
+- [x] **Step 2: Add initialization equations in merge_fmu_data** _(commit e151b40f)_
 
 In `src/systems/fmu_compilation.jl`, in the `merge_fmu_data` function, after the existing initial_conditions merge block (after line 128), add:
 
@@ -164,13 +182,13 @@ In `src/systems/fmu_compilation.jl`, in the `merge_fmu_data` function, after the
     end
 ```
 
-- [ ] **Step 3: Run test to verify it passes**
+- [x] **Step 3: Run test to verify it passes** _(commit e151b40f)_
 
 Run: `cd /Users/anshul/temp/ModelingToolkit.jl && julia --project -e 'using Pkg; Pkg.activate("test/fmi"); include("test/fmi/fmu_events.jl")'`
 
 The "AD-safe initialization" test should pass — `ODEProblem` construction succeeds without `build_initializeprob=false`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit** _(commit e151b40f)_
 
 ```bash
 git add src/systems/fmu_compilation.jl test/fmi/fmu_events.jl
@@ -188,7 +206,7 @@ Add the `RawCallbacksKey` metadata mechanism so pre-lowered callbacks (from FMU 
 - Modify: `src/systems/fmu_compilation.jl`
 - Modify: `lib/ModelingToolkitBase/src/systems/fmu/fmusystem.jl`
 
-- [ ] **Step 1: Define RawCallbacksKey in fmu_compilation.jl**
+- [x] **Step 1: Define RawCallbacksKey in fmu_compilation.jl** _(commit 0453cd00 — see Post-Implementation Notes: actually defined in MTKBase)_
 
 In `src/systems/fmu_compilation.jl`, after the existing `FMUSubsystemsKey` struct (line 134), add:
 
@@ -198,7 +216,7 @@ In `src/systems/fmu_compilation.jl`, after the existing `FMUSubsystemsKey` struc
 struct RawCallbacksKey end
 ```
 
-- [ ] **Step 2: Add namespace_callback no-ops for FMU callback types**
+- [x] **Step 2: Add namespace_callback no-ops for FMU callback types** _(commit 0453cd00)_
 
 In `lib/ModelingToolkitBase/src/systems/fmu/fmusystem.jl`, at the end of the file (after line 295), add:
 
@@ -211,7 +229,7 @@ namespace_callback(cb::FMUStepCallback, s) = cb
 namespace_callback(cb::FMUStepEventCallback, s) = cb
 ```
 
-- [ ] **Step 3: Modify process_events to check for RawCallbacksKey**
+- [x] **Step 3: Modify process_events to check for RawCallbacksKey** _(commit 0453cd00)_
 
 In `lib/ModelingToolkitBase/src/systems/callbacks.jl`, replace the `process_events` function (lines 1524-1529):
 
@@ -242,7 +260,7 @@ end
 
 Note: `RawCallbacksKey` is defined in MTK (not MTKBase), but `getmetadata` uses `DataType` keys from `get_metadata()` which is an `ImmutableDict{DataType, Any}`. The type just needs to exist at runtime. Since MTK loads before problem construction, this works.
 
-- [ ] **Step 4: Add FMU callback lowering in merge_fmu_data**
+- [x] **Step 4: Add FMU callback lowering in merge_fmu_data** _(commit 0453cd00)_
 
 In `src/systems/fmu_compilation.jl`, in `merge_fmu_data`, replace the event merging section (lines 112-119):
 
@@ -286,7 +304,7 @@ New:
     end
 ```
 
-- [ ] **Step 5: Store lowered callbacks in metadata**
+- [x] **Step 5: Store lowered callbacks in metadata** _(commit 0453cd00)_
 
 Still in `merge_fmu_data`, right after the metadata line (`fmu_metadata = Base.ImmutableDict(...)`), add the lowered callbacks:
 
@@ -307,7 +325,7 @@ With:
     end
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit** _(commit 0453cd00)_
 
 ```bash
 git add src/systems/fmu_compilation.jl lib/ModelingToolkitBase/src/systems/callbacks.jl lib/ModelingToolkitBase/src/systems/fmu/fmusystem.jl
@@ -324,7 +342,7 @@ Wire the existing CS functors (`fmiCSInitialize!`, `fmiCSStep!`) into `SymbolicD
 - Modify: `ext/MTKFMIExt.jl:269-290`
 - Modify: `test/fmi/fmu_events.jl`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test** _(commit 328893cd)_
 
 Add this test to `test/fmi/fmu_events.jl`, inside the `"FMU Pipeline - Reference FMUs"` testset:
 
@@ -349,7 +367,7 @@ Add this test to `test/fmi/fmu_events.jl`, inside the `"FMU Pipeline - Reference
 end
 ```
 
-- [ ] **Step 2: Wire CS callbacks in FMIComponent**
+- [x] **Step 2: Wire CS callbacks in FMIComponent** _(commit 328893cd)_
 
 In `ext/MTKFMIExt.jl`, replace the CS branch of `FMIComponent` (lines 269-290):
 
@@ -420,7 +438,7 @@ In `ext/MTKFMIExt.jl`, replace the CS branch of `FMIComponent` (lines 269-290):
 
 Note: The `fmiCSStep!` and `fmiCSInitialize!` functions already exist in the extension (lines 868-921 for FMI2, 960-1015 for FMI3). The `FMUStepCallback` is lowered to `PeriodicCallback` by the infrastructure from Task 3.
 
-- [ ] **Step 3: Implement the FMU step callback lowering stubs**
+- [x] **Step 3: Implement the FMU step callback lowering stubs** _(commit 328893cd)_
 
 The `lower_fmu_step_callback` in `src/systems/fmu_codegen.jl` calls `fmu_do_step!` and `fmu_read_outputs!`. These need implementations in the extension. However, for CS FMUs using the `FMI2CSFunctor`/`FMI3CSFunctor` approach with `ImperativeAffect`, the periodic callback uses the functor directly — so the step callback lowering needs to work with the wrapper.
 
@@ -467,13 +485,13 @@ function MTK.fmu_read_outputs!(wrapper::FMI3InstanceWrapper, integrator)
 end
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes** _(commit 328893cd)_
 
 Run: `cd /Users/anshul/temp/ModelingToolkit.jl && julia --project -e 'using Pkg; Pkg.activate("test/fmi"); include("test/fmi/fmu_events.jl")'`
 
 The "CoSimulation FMU (Dahlquist)" test should pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit** _(commit 328893cd)_
 
 ```bash
 git add ext/MTKFMIExt.jl test/fmi/fmu_events.jl
@@ -491,7 +509,7 @@ Create `FMUContinuousCallback` in `FMIComponent` when `n_event_indicators > 0`, 
 - Modify: `ext/MTKFMIExt.jl` (add FMI operation implementations)
 - Modify: `test/fmi/fmu_events.jl`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test** _(commit b868bed0)_
 
 Add this test to `test/fmi/fmu_events.jl`, inside the `"FMU Pipeline - Reference FMUs"` testset:
 
@@ -526,7 +544,7 @@ Add this test to `test/fmi/fmu_events.jl`, inside the `"FMU Pipeline - Reference
 end
 ```
 
-- [ ] **Step 2: Create FMUContinuousCallback in ME path**
+- [x] **Step 2: Create FMUContinuousCallback in ME path** _(commit b868bed0)_
 
 In `ext/MTKFMIExt.jl`, in the ME branch of `FMIComponent` (around line 248, after `disc_events = Any[lifecycle_cb]`), add event indicator handling:
 
@@ -544,7 +562,7 @@ Then pass `cont_events` to the FMUSystem constructor. Change the `return MTK.FMU
             continuous_events = cont_events,
 ```
 
-- [ ] **Step 3: Implement FMI event operation stubs**
+- [x] **Step 3: Implement FMI event operation stubs** _(commit b868bed0)_
 
 In `ext/MTKFMIExt.jl`, at the end (before `end # module`), add implementations for the event-related stubs:
 
@@ -624,7 +642,7 @@ function MTK.fmu_enter_continuous_time_mode!(wrapper::FMI2InstanceWrapper)
 end
 ```
 
-- [ ] **Step 4: Update ME get_instance to NOT auto-enter continuous time mode for event FMUs**
+- [x] **Step 4: Update ME get_instance to NOT auto-enter continuous time mode for event FMUs** _(commit b868bed0)_
 
 The existing `get_instance_ME!` in `ext/MTKFMIExt.jl` (lines 746-758 for FMI3, 552-563 for FMI2) does initial event iteration and enters continuous time mode. This is fine — the initial event iteration happens once at instantiation. The `VectorContinuousCallback` from the lowering handles subsequent events during integration.
 
@@ -644,13 +662,13 @@ function partiallyCompleteIntegratorStep(wrapper::FMI3InstanceWrapper)
 end
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes** _(commit b868bed0)_
 
 Run: `cd /Users/anshul/temp/ModelingToolkit.jl && julia --project -e 'using Pkg; Pkg.activate("test/fmi"); include("test/fmi/fmu_events.jl")'`
 
 The "BouncingBall (event indicators)" test should pass — the ball bounces, height stays non-negative, velocity reverses.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit** _(commit b868bed0)_
 
 ```bash
 git add ext/MTKFMIExt.jl test/fmi/fmu_events.jl
@@ -666,7 +684,7 @@ Run all FMU tests together, verify existing tests still pass, and clean up the t
 **Files:**
 - Modify: `test/fmi/fmu_events.jl`
 
-- [ ] **Step 1: Verify all tests pass together**
+- [x] **Step 1: Verify all tests pass together** _(commit d9fd63fe)_
 
 Run all FMU tests:
 ```bash
@@ -683,7 +701,7 @@ All testsets should pass:
 - CoSimulation FMU (Dahlquist)
 - BouncingBall (event indicators)
 
-- [ ] **Step 2: Remove the composed MTK+FMU TODO comment**
+- [x] **Step 2: Remove the composed MTK+FMU TODO comment** _(commit d9fd63fe)_
 
 In `test/fmi/fmu_events.jl`, remove the TODO comment that was deferring composed tests:
 
@@ -693,9 +711,47 @@ In `test/fmi/fmu_events.jl`, remove the TODO comment that was deferring composed
     # available during the symbolic compilation pass before FMU merge)
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit** _(commit d9fd63fe)_
 
 ```bash
 git add test/fmi/fmu_events.jl
 git commit -m "test: verify all FMU pipeline tests pass, remove deferred TODO"
 ```
+
+---
+
+## Post-Implementation Notes
+
+The implementation matches the plan very closely. The divergences below are all minor and were resolved while executing the plan.
+
+### Task 3 — `RawCallbacksKey` lives in MTKBase, not MTK
+
+The plan's Step 1 (and the accompanying note after Step 3) said `RawCallbacksKey` would be defined in MTK's `src/systems/fmu_compilation.jl` and referenced from MTKBase via "the type just needs to exist at runtime". In practice this was reversed: the struct was defined in `lib/ModelingToolkitBase/src/systems/callbacks.jl` (right above `process_events`, around line 1525) because that's where the only consumer lives and it keeps MTKBase self-contained.
+
+As a consequence, `src/systems/fmu_compilation.jl` stores the callback set under `MTKBase.RawCallbacksKey` (not a local key), and the `FMUSubsystemsKey` struct is the only metadata key actually defined in `fmu_compilation.jl`.
+
+### Task 3 — `process_events` uses the `SU` alias
+
+The plan showed `hasmetadata(sys, RawCallbacksKey)` / `getmetadata(sys, RawCallbacksKey, nothing)`. The actual implementation uses the `SU.` prefix (`SU.hasmetadata` / `SU.getmetadata`) which is the SymbolicUtils alias used throughout MTKBase — this is a purely stylistic change needed because the unqualified functions aren't in scope at that call site.
+
+### Task 3 — `process_events` pre-existing bug fix
+
+The old `process_events` returned `CallbackSet(contin_cbs, discrete_cbs...)` when discrete callbacks were present, which silently dropped any callbacks merged into `cb` via `merge_cb`. The new implementation returns `CallbackSet(cb, discrete_cbs...)`, picking up both the user-supplied `callback` and the `RawCallbacksKey` raw callbacks. This fix was necessary for the `RawCallbacksKey` merge to take effect at all — the plan's "New" snippet happens to show the correct form, but the plan didn't call out that this was also fixing an existing bug.
+
+### Task 3 — `namespace_callback` no-ops placement
+
+The no-ops were added around line 276 of `lib/ModelingToolkitBase/src/systems/fmu/fmusystem.jl` (just after the `get_*` no-op accessors, before the `# ---- FMU-specific accessors ----` block), not strictly "at the end of the file" as the plan suggested. Functionally identical.
+
+### Task 5 — ME path variable naming
+
+The plan said to add `cont_events = Any[]` around line 248. In the actual code it sits just above `disc_events = Any[lifecycle_cb]` (around line 251) and is passed as `continuous_events = cont_events` in the `FMUSystem` constructor call — matching the plan's intent.
+
+### Task 5 — `partiallyCompleteIntegratorStep` assertion removal
+
+The plan asked to "remove the assertion" on `enterEventMode[] == fmi3False` and replace it with a comment. The actual implementation does exactly that, keeping only the `terminateSimulation[]` assertion (see `ext/MTKFMIExt.jl` around line 826).
+
+### Not in the original plan — CI Reference FMU download
+
+The plan did not cover CI infrastructure. During execution it became clear the Reference FMUs aren't vendored, so `test/fmi/fmu_events.jl` was updated to require the `REFERENCE_FMUS_DIR` env var explicitly (no local-path fallback) and `.github/workflows/Tests.yml` grew a "Download Reference FMUs" step (commit `66ddd02d`) that fetches pre-built FMUs from
+`https://github.com/modelica/Reference-FMUs/releases/download/v0.0.39/Reference-FMUs-0.0.39.zip`
+and sets `REFERENCE_FMUS_DIR` to the unpacked `3.0/` directory for FMI-tagged test jobs.

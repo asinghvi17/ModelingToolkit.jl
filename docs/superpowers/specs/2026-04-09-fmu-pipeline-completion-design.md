@@ -230,3 +230,49 @@ Features 2 and 3 both need FMU callback types lowered to SciML callbacks at prob
 4. **Feature 3: Event handling** — extension FMI stubs + BouncingBall test (uses same lowering infra from Feature 2)
 
 Features 2 and 3 share the callback lowering infrastructure, so they're ordered to build it incrementally.
+
+---
+
+## Post-Implementation Notes
+
+All four features shipped on the `as/fmicomponent` branch. The implementation follows this spec very closely; the deviations below are all minor and captured for future readers.
+
+### Feature 1 — Composed MTK+FMU equations (commit `86d853cd`)
+
+Implemented exactly as designed. `__mtkcompile` in `src/systems/systems.jl` injects `fmu_data.unknowns` into `get_ps(sys)` immediately after `collect_fmu_variables` and before `extract_top_level_statemachines`. `merge_fmu_data` in `src/systems/fmu_compilation.jl` filters them back out before appending real FMU parameters.
+
+### Feature 2 — CoSimulation support (commit `328893cd`)
+
+Implemented as designed. The CS branch of `FMIComponent` in `ext/MTKFMIExt.jl` (around line 275) constructs an `ImperativeAffect`-based initialize callback using `fmiCSInitialize!`, a lifecycle `SymbolicDiscreteCallback`, and an `FMUStepCallback(wrapper_obj, communication_step_size)`. Both callbacks are passed via `discrete_events = Any[lifecycle_cb, step_cb]` to the `FMUSystem{CoSimulation}` constructor.
+
+`fmu_do_step!` and `fmu_read_outputs!` are implemented at the bottom of `ext/MTKFMIExt.jl` (around lines 1058–1095) for both `FMI2InstanceWrapper` and `FMI3InstanceWrapper`.
+
+### Feature 3 — Event handling / BouncingBall (commit `b868bed0`)
+
+Implemented as designed. In the ME branch of `FMIComponent` (around line 251), when `caps.n_event_indicators > 0` an `FMUContinuousCallback(wrapper_obj, caps.n_event_indicators)` is pushed into `cont_events = Any[]` and passed as `continuous_events = cont_events` to the `FMUSystem` constructor.
+
+All six FMI event operations (`fmu_get_event_indicators!`, `fmu_enter_event_mode!`, `fmu_update_discrete_states!`, `fmu_get_continuous_states!`, `fmu_enter_continuous_time_mode!`, plus the FMI 2 / FMI 3 pair for each) are at the bottom of `ext/MTKFMIExt.jl` (around lines 1097–1168).
+
+One tweak not explicitly called out in the spec: `partiallyCompleteIntegratorStep` (around line 826) had its `@assert enterEventMode[] == FMI.fmi3False` removed because, for FMUs with event indicators, the FMI library can legitimately request an event-mode transition from inside the integrator-step completion — this is now handled by the `VectorContinuousCallback` instead of being an assertion failure. Only the `terminateSimulation[]` assertion remains.
+
+### Feature 4 — AD-safe initialization (commit `e151b40f`)
+
+Implemented as designed in `merge_fmu_data`. For each `FMUSystem{ModelExchange}` in the subsystem list, any state that appears in `get_default_values(fmu)` gets a pinning equation `renamespace(fmu, state) ~ fmu_defaults[state]` appended to `initialization_eqs`. The CS path intentionally does not emit these (CS states are parameters, not unknowns, so they don't enter the init solver).
+
+### Shared infrastructure — Callback lowering pass (commit `0453cd00`)
+
+The spec left the exact mechanism open ("new function in `fmu_compilation.jl` or `fmu_codegen.jl` ... hook into `ODEProblem` construction"). The implementation chose a metadata-injection approach:
+
+1. **`RawCallbacksKey` lives in MTKBase**, not MTK. It is defined in `lib/ModelingToolkitBase/src/systems/callbacks.jl` directly above `process_events` (around line 1525). This is the opposite of an earlier working hypothesis; defining it in MTKBase keeps the consumer self-contained and avoids the "type only needs to exist at runtime" hack.
+2. **`merge_fmu_data` partitions FMU events** into opaque (`FMUStepCallback`, `FMUContinuousCallback`) vs symbolic (`SymbolicDiscreteCallback`, etc.). Opaque ones are lowered immediately via `lower_fmu_step_callback` / `lower_fmu_continuous_callback` and the resulting SciML callbacks are bundled into a `CallbackSet` (or left as a single callback if there's only one) and stored on the compiled system's metadata under `MTKBase.RawCallbacksKey`. Symbolic ones are merged into `compiled_sys.discrete_events` as normal.
+3. **`process_events` picks them up** during problem construction: after generating the symbolic callback set, it checks `SU.hasmetadata(sys, RawCallbacksKey)` and, if present, merges the stored `CallbackSet` into `cb` before assembling the final return value. It also returns `CallbackSet(cb, discrete_cbs...)` instead of the pre-existing `CallbackSet(contin_cbs, discrete_cbs...)` — the latter was a pre-existing bug that silently dropped any callbacks merged into `cb` via `merge_cb`, and the fix was necessary for the `RawCallbacksKey` merge (and user-supplied `callback=`) to take effect at all.
+4. **`namespace_callback` no-ops** for `FMUContinuousCallback`, `FMUTimeCallback`, `FMUStepCallback`, and `FMUStepEventCallback` live in `lib/ModelingToolkitBase/src/systems/fmu/fmusystem.jl` (around line 276), so that the generic system-tree namespacing in `collect_fmu_variables` passes them through unchanged.
+
+The result is that there is no separate `lower_fmu_callbacks(sys)` function as the spec suggested — the lowering happens eagerly inside `merge_fmu_data` and the already-lowered SciML callbacks are smuggled through to `process_events` via metadata. Functionally this matches the spec ("scan events for FMU callback types, call the appropriate lowering function, return standard SciML callbacks") but the dispatch point moved from problem construction to compilation.
+
+### Not in the original spec — Reference FMU hosting for CI (commit `66ddd02d`)
+
+The spec did not address how CI would obtain Reference FMUs. In practice:
+
+- `test/fmi/fmu_events.jl` now requires `ENV["REFERENCE_FMUS_DIR"]` to be set and logs a skip message otherwise. There is no local-path fallback.
+- `.github/workflows/Tests.yml` gained a "Download Reference FMUs" step (gated on `contains(matrix.pkggroup, 'FMI')`) that `curl`s `https://github.com/modelica/Reference-FMUs/releases/download/v0.0.39/Reference-FMUs-0.0.39.zip`, unpacks the `3.0/` subtree, and passes `REFERENCE_FMUS_DIR=${{ github.workspace }}/Reference-FMUs/3.0` into the FMI test job.
