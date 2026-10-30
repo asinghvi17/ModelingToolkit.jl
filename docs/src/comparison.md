@@ -55,6 +55,12 @@
     expansive set of system types, including SDEs, PDEs, optimization problems,
     and more.
 
+## Relationship to Dyad
+
+[Dyad](https://help.juliahub.com/dyad/stable/manual/syntax.html) is JuliaHub's
+declarative modeling language for acausal, component-based modeling of physical
+systems. Dyad models compile to ModelingToolkit models and Julia analysis functions.
+
 ## Comparison Against CASADI
 
   - CASADI is written in C++ but used from Python/MATLAB, meaning that it cannot be

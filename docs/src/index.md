@@ -87,6 +87,9 @@ For quick development, ModelingToolkit.jl includes
 [ModelingToolkitStandardLibrary.jl](https://docs.sciml.ai/ModelingToolkitStandardLibrary/stable/),
 a standard library of prebuilt components for the ModelingToolkit ecosystem.
 
+JuliaHub's [Dyad](https://help.juliahub.com/dyad/stable/) is a modeling language and
+toolchain for component-based physical modeling built on ModelingToolkit.
+
 ## Model Import Formats
 
   - [CellMLToolkit.jl](https://docs.sciml.ai/CellMLToolkit/stable/): Import [CellML](https://www.cellml.org/) models into ModelingToolkit
