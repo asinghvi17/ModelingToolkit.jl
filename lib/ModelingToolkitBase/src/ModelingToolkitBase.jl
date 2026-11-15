@@ -438,7 +438,7 @@ export solve
 export Pre
 
 export calculate_jacobian, generate_jacobian, generate_rhs, generate_custom_function,
-    generate_W, calculate_hessian
+    generate_W, calculate_hessian, ChunkedJacobian
 export calculate_control_jacobian, generate_control_jacobian
 export calculate_paramjac, generate_paramjac
 export calculate_tgrad, generate_tgrad

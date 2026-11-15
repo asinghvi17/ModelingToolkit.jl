@@ -55,7 +55,8 @@ function SciMLBase.NonlinearFunction{iip, spec}(
     end
 
     if jac
-        _jac = generate_jacobian(sys, codegen_opts; simplify, sparse)
+        _jac = generate_jacobian(
+            sys, codegen_opts; simplify, sparse, jac_chunk_size = opts.jac_chunk_size)
     else
         _jac = nothing
     end

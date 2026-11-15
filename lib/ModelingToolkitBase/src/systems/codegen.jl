@@ -369,6 +369,47 @@ function generate_diffusion_function(sys::System, opts::GeneratedFunctionOptions
     )
 end
 
+# `SU.scalarize` lowers `a[k]` to `getindex(scalarize(a), k)`, which throws for
+# symbolic `k`. Such `getindex` terms are already scalar — mask them with an
+# opaque symbol while the array terms expand, then restore them.
+function _scalarize_for_tgrad(x)
+    # A plain tree walk revisits the equation DAG's shared subexpressions
+    # exponentially; dedup on identity. `ArrayOp` internals are skipped: their
+    # bound output indices are scalarized by substitution, not materialization.
+    idxs = SymbolicT[]
+    seen = Base.IdSet{Any}()
+    todo = Any[x]
+    while !isempty(todo)
+        y = pop!(todo)
+        (y isa SymbolicT && iscall(y) && !(y in seen)) || continue
+        push!(seen, y)
+        if SU.isterm(y) && operation(y) === getindex &&
+                !SU.is_array_shape(SU.shape(y)) && !_tgrad_const_indexed(y)
+            push!(idxs, y)  # masking the outer term covers nested ones
+        elseif !SU.isarrayop(y)
+            append!(todo, arguments(y))
+        end
+    end
+    isempty(idxs) && return SU.scalarize(x)
+    masks = Dict{SymbolicT, SymbolicT}(
+        y => SSym(Symbol("###_tgrad_getindex_", i); type = symtype(y))
+        for (i, y) in enumerate(idxs)
+    )
+    y = SU.scalarize(substitute(x, masks))
+    return substitute(y, Dict(v => k for (k, v) in masks))
+end
+
+# Mirrors the `StableIndex{Int}` check `SU.scalarize` itself performs: only
+# constant-indexed `getindex` terms can be expanded.
+function _tgrad_const_indexed(x)
+    try
+        SU.StableIndex{Int}(x)
+        return true
+    catch
+        return false
+    end
+end
+
 """
     $(TYPEDSIGNATURES)
 
@@ -380,13 +421,33 @@ function calculate_tgrad(sys::System; simplify = false)
     # We need to remove explicit time dependence on the unknown because when we
     # have `u(t) * t` we want to have the tgrad to be `u(t)` instead of `u'(t) *
     # t + u(t)`.
-    rhs = [detime_dvs(eq.rhs) for eq in full_equations(sys)]
+    cache = IdDict{Any, Any}()
+    rhs = [_detime_dvs(eq.rhs, cache) for eq in full_equations(sys)]
     iv = get_iv(sys)
     xs = flat_unknowns(sys)
-    rule = Dict(map((x, xt) -> xt => x, detime_dvs.(xs), xs))
+    # `detime_dvs` detimes every `x(t)`-shaped term — including time-varying
+    # parameters such as `@discretes` (`gear_index(t)`), which are not unknowns
+    # and are correctly treated as constant by the `t` derivative. The
+    # round-trip rules must cover them as well: a detimed parameter left in the
+    # result is not restored and generates code that references a bare symbol
+    # (unbound) instead of indexing `p`.
+    xs_p = [xs; parameters(sys; initial_parameters = true)]
+    # `substitute` only rewrites whole terms, so indexed subterms of an array
+    # entry (`v[i]`, `Initial(v[i])`) would slip through: include the scalarized
+    # elements alongside their array parents in the round-trip maps.
+    xs_p = mapreduce(vcat, xs_p; init = SymbolicT[]) do x
+        sx = SU.scalarize(x)
+        sx isa AbstractArray ? [x; vec(sx)] : [x]
+    end
+    dts = [_detime_dvs(x, cache) for x in xs_p]
+    rule = Dict(xt => x for (x, xt) in zip(dts, xs_p))
     rhs = substitute.(rhs, Ref(rule))
+    # `expand_derivatives`/`occursin_info` reject array-shaped subexpressions:
+    # expand `dot`/view/broadcast terms over array unknowns into scalar
+    # `getindex` expressions before differentiating.
+    rhs = _scalarize_for_tgrad.(rhs)
     tgrad = [expand_derivatives(Differential(iv)(r), simplify) for r in rhs]
-    reverse_rule = Dict(map((x, xt) -> x => xt, detime_dvs.(xs), xs))
+    reverse_rule = Dict(x => xt for (x, xt) in zip(dts, xs_p))
     tgrad = Num.(substitute.(tgrad, Ref(reverse_rule)))
     return tgrad
 end
@@ -437,6 +498,106 @@ function calculate_jacobian(
 end
 
 """
+    ChunkedJacobian(funcs, ranges)
+
+A Jacobian generated as separate pieces, for sparse Jacobians whose generated
+code is too large for a consumer to compile as one function (e.g. `ptxas` on a
+CUDA kernel). `funcs[k]` is the in-place function `f(out, u, p..., t)` — the same
+signature as the whole sparse Jacobian — writing `out[ranges[k]]`, where `out` is
+an `AbstractVector` holding the Jacobian's stored entries in `jac_prototype`
+`nzval` order. Calling the `ChunkedJacobian` applies every piece in order to
+`out.nzval` (or to `out` itself when `out` is already the `nzval` vector).
+"""
+struct ChunkedJacobian{F, R}
+    funcs::F
+    ranges::R
+end
+
+# `SymbolicUtils.array_literal` lowers to `reshape(vect(args), sz)` — a `Vector`
+# allocated on every call. Harmless on the CPU, but generated code that runs in
+# a GPU kernel pays for it out of the device malloc pool, which nothing frees
+# during a solve: at ~200 B per call the default 8 MiB pool drains after a few
+# hundred steps and the kernel dies with "Out of dynamic GPU memory". The
+# literals are array-valued arguments rebuilt from scalarized elements (the
+# `xs`/`ys` tables of a registered `interp1(xs, ys, x)` say), so rewriting the
+# term to a positional `SVector`/`SMatrix` construction — `f <: StaticArray`
+# ops are already first-class to codegen — keeps the `AbstractArray`,
+# column-major semantics while being `isbits` and allocation-free. `MVector`
+# would preserve mutability, but a mutable buffer that escapes into an opaque
+# call still heap-allocates on device (measured 168 B/call for `MVector{21}`);
+# immutable `SVector` cannot. Very large literals keep the allocating form: a
+# 10k-element static array would live entirely in registers/stack.
+const _STATIC_LITERAL_MAX_ELEMS = 256
+
+function _staticize_literal(x)
+    (x isa SymbolicT && iscall(x) && operation(x) === SU.array_literal) ||
+        return nothing
+    args = arguments(x)
+    length(args) >= 2 || return nothing
+    sz = unwrap_const(args[1])
+    sz isa NTuple{N, Int} where {N} || return nothing
+    length(sz) in (1, 2) || return nothing
+    n = prod(sz)
+    (n >= 1 && n == length(args) - 1 && n <= _STATIC_LITERAL_MAX_ELEMS) ||
+        return nothing
+    T = length(sz) == 1 ? SVector{n} : StaticArraysCore.SMatrix{sz[1], sz[2]}
+    return BSImpl.Term{VartypeT}(T, Symbolics.SArgsT(args[2:end]);
+        type = symtype(x), shape = SU.shape(x), metadata = SU.metadata(x))
+end
+
+# Post-order walk over the shared symbolic DAG. `Rewriters.Postwalk` cannot be
+# used here: it has no memoization, and the Jacobian `nzval` entries share an
+# enormous common sub-DAG — walking it once per entry is effectively
+# exponential. One `Dict` cache spans the whole matrix, so each unique node is
+# visited once.
+function _staticize_walk(x, cache)
+    x isa SymbolicT || return x
+    haskey(cache, x) && return cache[x]
+    iscall(x) || return (cache[x] = x)
+    new = _staticize_literal(x)
+    if new === nothing
+        args = arguments(x)
+        changed = false
+        newargs = map(args) do a
+            na = _staticize_walk(a, cache)
+            changed |= na !== a
+            na
+        end
+        new = changed ? maketerm(
+            typeof(x), operation(x), newargs, metadata(x); type = symtype(x)
+        ) : x
+    end
+    return cache[x] = new
+end
+
+function _staticize_literals(jac::SparseMatrixCSC)
+    cache = Dict{SymbolicT, SymbolicT}()
+    return SparseMatrixCSC(jac.m, jac.n, jac.colptr, jac.rowval,
+        SymbolicT[_staticize_walk(Symbolics.unwrap(e), cache)::SymbolicT
+            for e in jac.nzval])
+end
+
+function _staticize_literals(jac::AbstractMatrix)
+    cache = Dict{SymbolicT, SymbolicT}()
+    return SymbolicT[_staticize_walk(Symbolics.unwrap(e), cache)::SymbolicT
+        for e in jac]
+end
+
+function _staticize_literals(v::AbstractVector)
+    cache = Dict{SymbolicT, SymbolicT}()
+    return SymbolicT[_staticize_walk(Symbolics.unwrap(e), cache)::SymbolicT
+        for e in v]
+end
+
+function (cj::ChunkedJacobian)(out, u, p, t)
+    nzv = out isa AbstractVector ? out : out.nzval
+    for f in cj.funcs
+        f(nzv, u, p, t)
+    end
+    return out
+end
+
+"""
     $(TYPEDSIGNATURES)
 
 Generate the jacobian function for the equations of a [`System`](@ref).
@@ -447,12 +608,16 @@ $GENERATE_X_KWARGS
 - `simplify`, `sparse`: Forwarded to [`calculate_jacobian`](@ref).
 - `checkbounds`: Whether to check correctness of indices at runtime if `sparse`.
   Also forwarded to `build_function_wrapper`.
+- `jac_chunk_size`: When `sparse` and positive, return a [`ChunkedJacobian`](@ref)
+  of `ceil(nnz / jac_chunk_size)` functions each writing a contiguous slice of the
+  Jacobian's `nzval` — split so each piece's generated code stays small enough to
+  compile (e.g. as a GPU kernel). `0` (the default) returns the single function.
 
 All other keyword arguments are forwarded to [`build_function_wrapper`](@ref).
 """
 function generate_jacobian(
         sys::System, opts::GeneratedFunctionOptions;
-        simplify::Bool = false, sparse::Bool = false
+        simplify::Bool = false, sparse::Bool = false, jac_chunk_size::Int = 0
     )
     (; eval_expression, eval_module, compiler_options) = opts
     expression = expression_val(opts)
@@ -462,7 +627,7 @@ function generate_jacobian(
     if !is_time_dependent(sys) && isempty(dvs) && isempty(equations(sys)) && !sparse
         return generate_empty_nonlinear_function(sys, opts, (0, 0))
     end
-    jac = calculate_jacobian(sys; simplify, sparse, dvs)
+    jac = _staticize_literals(calculate_jacobian(sys; simplify, sparse, dvs))
     p = reorder_parameters(sys)
     t = get_iv(sys)
     if t !== nothing && sparse && opts.codegen.checkbounds
@@ -475,6 +640,34 @@ function generate_jacobian(
     if is_time_dependent(sys)
         args = (args..., t)
         nargs = 3
+    end
+    if sparse && jac_chunk_size > 0
+        nzv = jac.nzval
+        ranges = collect(UnitRange{Int}, Iterators.partition(1:length(nzv), jac_chunk_size))
+        # A dense `nzval` slice with `outputidxs` writes `out[first(c):last(c)]` and
+        # — since `build_function_wrapper` subsets the IR to nodes reachable from
+        # `expr` — carries only the temporaries those entries need, unlike the
+        # sparse `rhss` path which drops `outputidxs`. The `assert_jac_length`
+        # header cannot hold for partial writes, so chunks always use
+        # `(identity, identity)` `wrap_code`.
+        funcs = map(ranges) do c
+            copts = setproperties(
+                opts.codegen, (;
+                    outputidxs = c, iip_config = (false, true),
+                    wrap_code = (identity, identity)
+                )
+            )
+            res = build_function_wrapper(
+                sys, collect(nzv[c]), collect(Any, args),
+                BuildFunctionWrapperOptions(; u_arg = 1, codegen_function_options = copts)
+            )
+            fns = maybe_compile_function(
+                expression, wrap_gfw, (2, nargs, is_split(sys)), res;
+                compiler_options, eval_expression, eval_module
+            )
+            return fns isa Tuple ? last(fns) : fns
+        end
+        return ChunkedJacobian(funcs, ranges)
     end
     res = build_function_wrapper(
         sys, jac, collect(Any, args), BuildFunctionWrapperOptions(;
@@ -521,7 +714,7 @@ function generate_tgrad(
     wrap_gfw = wrap_gfw_val(opts)
     dvs = flat_unknowns(sys)
     ps = parameters(sys; initial_parameters = true)
-    tgrad = calculate_tgrad(sys, simplify = simplify)
+    tgrad = _staticize_literals(calculate_tgrad(sys, simplify = simplify))
     p = reorder_parameters(sys, ps)
     res = build_function_wrapper(
         sys, tgrad,

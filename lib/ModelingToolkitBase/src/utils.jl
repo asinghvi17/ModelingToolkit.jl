@@ -49,15 +49,36 @@ end
 Turn `x(t)` into `x`
 """
 function detime_dvs(op)
-    return if !iscall(op)
-        op
-    elseif issym(operation(op))
-        SSym(nameof(operation(op)); type = Real, shape = SU.shape(op))
-    else
-        maketerm(
-            typeof(op), operation(op), detime_dvs.(arguments(op)),
-            metadata(op)
-        )
+    return _detime_dvs(op, IdDict{Any, Any}())
+end
+
+function _detime_dvs(op, cache)
+    get!(cache, op) do
+        if !iscall(op)
+            op
+        elseif issym(operation(op))
+            # Keep the dependent variable's own symtype: `type = Real` on an
+            # array-valued `x(t)` makes `promote_symtype` degrade indexing and
+            # `dot`-style terms over the detimed variables to `Any`.
+            SSym(nameof(operation(op)); type = symtype(op), shape = SU.shape(op))
+        else
+            f = operation(op)
+            args = _detime_dvs.(arguments(op), Ref(cache))
+            T = symtype(op)
+            try
+                t = maketerm(typeof(op), f, args, metadata(op))
+                # Rebuilding can degrade the term's recorded type to `Any`
+                # whenever `f` has no `promote_symtype` rule for the detimed
+                # arguments (indexing, views, broadcasts over the detimed
+                # array unknowns). Keep the type the term had.
+                if symtype(t) === Any && T !== Any
+                    t = maketerm(typeof(op), f, args, metadata(op); type = T)
+                end
+                t
+            catch
+                maketerm(typeof(op), f, args, metadata(op); type = T)
+            end
+        end
     end
 end
 
