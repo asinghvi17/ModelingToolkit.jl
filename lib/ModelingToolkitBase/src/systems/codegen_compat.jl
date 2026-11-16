@@ -13,13 +13,14 @@ function generate_rhs(
         eval_expression = false, eval_module = @__MODULE__,
         compiler_options::CompilerOptions = CompilerOptions(),
         implicit_dae = false, scalar = false, override_discrete = false,
-        cachesyms = nothing, extra_args::Tuple = (), kwargs...
+        cachesyms = nothing, extra_args::Tuple = (), static_array_literals::Bool = false,
+        kwargs...
     )
     return generate_rhs(
         sys,
         GeneratedFunctionOptions(;
             expression, wrap_gfw, eval_expression, eval_module,
-            compiler_options,
+            compiler_options, static_array_literals,
             codegen_function_options = Symbolics.CodegenFunctionOptions(; kwargs...)
         );
         implicit_dae, scalar, override_discrete, cachesyms, extra_args
@@ -43,13 +44,14 @@ function generate_jacobian(
         sys::System; expression = Val{true}, wrap_gfw = Val{false},
         eval_expression = false, eval_module = @__MODULE__,
         compiler_options::CompilerOptions = CompilerOptions(),
-        simplify = false, sparse = false, jac_chunk_size::Int = 0, kwargs...
+        simplify = false, sparse = false, jac_chunk_size::Int = 0,
+        static_array_literals::Bool = false, kwargs...
     )
     return generate_jacobian(
         sys,
         GeneratedFunctionOptions(;
             expression, wrap_gfw, eval_expression, eval_module,
-            compiler_options,
+            compiler_options, static_array_literals,
             codegen_function_options = Symbolics.CodegenFunctionOptions(; kwargs...)
         );
         simplify, sparse, jac_chunk_size
@@ -60,13 +62,13 @@ function generate_tgrad(
         sys::System; expression = Val{true}, wrap_gfw = Val{false},
         eval_expression = false, eval_module = @__MODULE__,
         compiler_options::CompilerOptions = CompilerOptions(),
-        simplify = false, kwargs...
+        simplify = false, static_array_literals::Bool = false, kwargs...
     )
     return generate_tgrad(
         sys,
         GeneratedFunctionOptions(;
             expression, wrap_gfw, eval_expression, eval_module,
-            compiler_options,
+            compiler_options, static_array_literals,
             codegen_function_options = Symbolics.CodegenFunctionOptions(; kwargs...)
         );
         simplify
