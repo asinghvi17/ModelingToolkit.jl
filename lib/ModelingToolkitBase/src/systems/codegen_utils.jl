@@ -241,7 +241,6 @@ struct SciMLFunctionOptions{expression}
     simplify::Bool
     initialization_data::Any
     check_compatibility::Bool
-    jac_chunk_size::Int
 end
 
 function SciMLFunctionOptions(;
@@ -257,7 +256,6 @@ function SciMLFunctionOptions(;
         nanmath::Bool = true, wrap_code::Tuple = (identity, identity),
         iip_config::NTuple{2, Bool} = (true, true), sort_addmul::Bool = false,
         similarto = nothing, outputidxs = nothing, skipzeros::Bool = false,
-        jac_chunk_size::Int = 0,
         kwargs...,
     )
     E = _gfo_bool(expression)
@@ -278,7 +276,7 @@ function SciMLFunctionOptions(;
     )
     return SciMLFunctionOptions{E}(
         codegen, u0, p, t, jac, tgrad, paramjac, sparse, sparsity, analytic, simplify,
-        initialization_data, check_compatibility, jac_chunk_size,
+        initialization_data, check_compatibility,
     )
 end
 
