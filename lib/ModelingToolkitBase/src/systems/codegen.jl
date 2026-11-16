@@ -399,15 +399,21 @@ function _scalarize_for_tgrad(x)
     return substitute(y, Dict(v => k for (k, v) in masks))
 end
 
-# Mirrors the `StableIndex{Int}` check `SU.scalarize` itself performs: only
-# constant-indexed `getindex` terms can be expanded.
+# Whether the scalar `getindex` term `x` has only literal `Int` indices: the
+# condition under which `SU.scalarize` can expand it (it builds a
+# `StableIndex{Int}` from exactly these indices).
 function _tgrad_const_indexed(x)
-    try
-        SU.StableIndex{Int}(x)
-        return true
-    catch
-        return false
-    end
+    args = arguments(x)
+    return all(i -> unwrap_const(args[i]) isa Int, 2:length(args))
+end
+
+# Share one `executediff` memo across all rows of the time gradient: the rows
+# are a shared expression DAG. Symbolics versions without
+# `with_derivative_memo` keep a memo of their own.
+@static if isdefined(Symbolics, :with_derivative_memo)
+    _with_derivative_memo(f) = Symbolics.with_derivative_memo(f)
+else
+    _with_derivative_memo(f) = f()
 end
 
 """
@@ -424,6 +430,18 @@ function calculate_tgrad(sys::System; simplify = false)
     cache = IdDict{Any, Any}()
     rhs = [_detime_dvs(eq.rhs, cache) for eq in full_equations(sys)]
     iv = get_iv(sys)
+    # Each detimed `x(t)` maps back to the very term it replaced in the
+    # equations. The round-trip rules below cannot do this alone: a
+    # symbolically indexed `v[i]` keeps the parent array `v(t)` through
+    # scalarization, which `flat_unknowns` (holding only the elements) lacks,
+    # and the `unknowns` copy of `v(t)` carries different metadata.
+    restore = Dict{SymbolicT, SymbolicT}()
+    for (orig, dt) in cache
+        if orig !== dt && iscall(orig) && issym(operation(orig)) &&
+                isequal(arguments(orig), [iv])
+            restore[dt] = orig
+        end
+    end
     xs = flat_unknowns(sys)
     # `detime_dvs` detimes every `x(t)`-shaped term — including time-varying
     # parameters such as `@discretes` (`gear_index(t)`), which are not unknowns
@@ -446,8 +464,11 @@ function calculate_tgrad(sys::System; simplify = false)
     # expand `dot`/view/broadcast terms over array unknowns into scalar
     # `getindex` expressions before differentiating.
     rhs = _scalarize_for_tgrad.(rhs)
-    tgrad = [expand_derivatives(Differential(iv)(r), simplify) for r in rhs]
+    tgrad = _with_derivative_memo() do
+        [expand_derivatives(Differential(iv)(r), simplify) for r in rhs]
+    end
     reverse_rule = Dict(x => xt for (x, xt) in zip(dts, xs_p))
+    merge!(reverse_rule, restore)
     tgrad = Num.(substitute.(tgrad, Ref(reverse_rule)))
     return tgrad
 end
