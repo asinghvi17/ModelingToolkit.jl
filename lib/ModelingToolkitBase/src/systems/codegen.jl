@@ -316,7 +316,8 @@ function generate_rhs(
     res = build_function_wrapper(
         sys, rhss, collect(Any, args), BuildFunctionWrapperOptions(;
             p_start, extra_assignments, u_arg, n_param_buffers, p_end_kw...,
-            codegen_function_options = codegen_opts
+            codegen_function_options = codegen_opts,
+            static_array_literals = opts.static_array_literals
         )
     )
     nargs = length(args) - length(p) + 1
@@ -546,16 +547,28 @@ function _staticize_literal(x)
 end
 
 # Post-order walk over the shared symbolic DAG. `Rewriters.Postwalk` cannot be
-# used here: it has no memoization, and the Jacobian `nzval` entries share an
-# enormous common sub-DAG — walking it once per entry is effectively
-# exponential. One `Dict` cache spans the whole matrix, so each unique node is
-# visited once.
-function _staticize_walk(x, cache)
+# used here: it has no memoization, and the expressions of one function share an
+# enormous common sub-DAG, so walking it once per output entry is effectively
+# exponential. One identity-keyed cache spans the whole function, so each unique
+# node is visited once and nodes differing only in metadata are not conflated.
+# `ArrayOp` nodes are left alone: their bodies are written in terms of bound
+# index variables. An `ArrayMaker` (e.g. the assembled residual of
+# `generate_rhs`) hides its region values from `arguments`, so it is rebuilt
+# from them directly, as SymbolicUtils' own CSE pass does.
+function _staticize_walk(x, cache::IdDict{SymbolicT, SymbolicT})
     x isa SymbolicT || return x
     haskey(cache, x) && return cache[x]
-    iscall(x) || return (cache[x] = x)
+    (iscall(x) && !SU.isarrayop(x)) || return (cache[x] = x)
     new = _staticize_literal(x)
-    if new === nothing
+    if new === nothing && SU.isarraymaker(x)
+        new = Moshi.Match.@match x begin
+            BSImpl.ArrayMaker(; regions, values, metadata, type, shape) => begin
+                newvalues = SymbolicT[_staticize_walk(v, cache) for v in values]
+                any(i -> newvalues[i] !== values[i], eachindex(values)) ?
+                    BSImpl.ArrayMaker{VartypeT}(regions, newvalues; metadata, type, shape) : x
+            end
+        end
+    elseif new === nothing
         args = arguments(x)
         changed = false
         newargs = map(args) do a
@@ -570,24 +583,27 @@ function _staticize_walk(x, cache)
     return cache[x] = new
 end
 
+"""
+    _staticize_literals(expr)
+
+`expr` (a symbolic expression, or an array or sparse matrix of them) with every
+`SymbolicUtils.array_literal` of at most `$_STATIC_LITERAL_MAX_ELEMS` elements
+rewritten to a static array. Used by `build_function_wrapper` under the
+`static_array_literals` option.
+"""
 function _staticize_literals(jac::SparseMatrixCSC)
-    cache = Dict{SymbolicT, SymbolicT}()
+    cache = IdDict{SymbolicT, SymbolicT}()
     return SparseMatrixCSC(jac.m, jac.n, jac.colptr, jac.rowval,
         SymbolicT[_staticize_walk(Symbolics.unwrap(e), cache)::SymbolicT
             for e in jac.nzval])
 end
 
-function _staticize_literals(jac::AbstractMatrix)
-    cache = Dict{SymbolicT, SymbolicT}()
-    return SymbolicT[_staticize_walk(Symbolics.unwrap(e), cache)::SymbolicT
-        for e in jac]
+function _staticize_literals(x::AbstractArray)
+    cache = IdDict{SymbolicT, SymbolicT}()
+    return map(e -> _staticize_walk(Symbolics.unwrap(e), cache), x)
 end
 
-function _staticize_literals(v::AbstractVector)
-    cache = Dict{SymbolicT, SymbolicT}()
-    return SymbolicT[_staticize_walk(Symbolics.unwrap(e), cache)::SymbolicT
-        for e in v]
-end
+_staticize_literals(x) = _staticize_walk(Symbolics.unwrap(x), IdDict{SymbolicT, SymbolicT}())
 
 function (cj::ChunkedJacobian)(out, u, p, t)
     nzv = out isa AbstractVector ? out : out.nzval
@@ -627,7 +643,7 @@ function generate_jacobian(
     if !is_time_dependent(sys) && isempty(dvs) && isempty(equations(sys)) && !sparse
         return generate_empty_nonlinear_function(sys, opts, (0, 0))
     end
-    jac = _staticize_literals(calculate_jacobian(sys; simplify, sparse, dvs))
+    jac = calculate_jacobian(sys; simplify, sparse, dvs)
     p = reorder_parameters(sys)
     t = get_iv(sys)
     if t !== nothing && sparse && opts.codegen.checkbounds
@@ -659,7 +675,10 @@ function generate_jacobian(
             )
             res = build_function_wrapper(
                 sys, collect(nzv[c]), collect(Any, args),
-                BuildFunctionWrapperOptions(; u_arg = 1, codegen_function_options = copts)
+                BuildFunctionWrapperOptions(;
+                    u_arg = 1, codegen_function_options = copts,
+                    static_array_literals = opts.static_array_literals
+                )
             )
             fns = maybe_compile_function(
                 expression, wrap_gfw, (2, nargs, is_split(sys)), res;
@@ -672,7 +691,8 @@ function generate_jacobian(
     res = build_function_wrapper(
         sys, jac, collect(Any, args), BuildFunctionWrapperOptions(;
             u_arg = 1,
-            codegen_function_options = setproperties(opts.codegen, (; wrap_code))
+            codegen_function_options = setproperties(opts.codegen, (; wrap_code)),
+            static_array_literals = opts.static_array_literals
         )
     )
     return maybe_compile_function(
@@ -714,14 +734,15 @@ function generate_tgrad(
     wrap_gfw = wrap_gfw_val(opts)
     dvs = flat_unknowns(sys)
     ps = parameters(sys; initial_parameters = true)
-    tgrad = _staticize_literals(calculate_tgrad(sys, simplify = simplify))
+    tgrad = calculate_tgrad(sys, simplify = simplify)
     p = reorder_parameters(sys, ps)
     res = build_function_wrapper(
         sys, tgrad,
         [Any[dvs]; p; Any[get_iv(sys)]],
         BuildFunctionWrapperOptions(;
             u_arg = 1,
-            codegen_function_options = opts.codegen
+            codegen_function_options = opts.codegen,
+            static_array_literals = opts.static_array_literals
         )
     )
 

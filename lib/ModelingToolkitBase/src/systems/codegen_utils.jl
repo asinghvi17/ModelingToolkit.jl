@@ -94,22 +94,30 @@ type is invariant to their values.
 - `compiler_options`: a [`CompilerOptions`](@ref).
 - `codegen_function_options`: a `Symbolics.CodegenFunctionOptions` with the code-generation
   options forwarded down to `build_function_wrapper`.
+- `static_array_literals`: rewrite small array literals in the generated code (e.g. the
+  tables of a registered `interp1(xs, ys, x)`) into `SVector`/`SMatrix` constructions, so
+  evaluating them does not heap-allocate. Off by default. Turn it on for code that runs
+  inside GPU kernels, where every allocation draws on the device malloc pool. See
+  [`build_function_wrapper`](@ref).
 """
 struct GeneratedFunctionOptions{expression, wrap_gfw}
     eval_expression::Bool
     eval_module::Module
     compiler_options::CompilerOptions
     codegen::Symbolics.CodegenFunctionOptions
+    static_array_literals::Bool
 end
 
 function GeneratedFunctionOptions(;
         expression = Val{true}, wrap_gfw = Val{false},
         eval_expression = false, eval_module = @__MODULE__,
         compiler_options::CompilerOptions = CompilerOptions(),
-        codegen_function_options::Symbolics.CodegenFunctionOptions = Symbolics.CodegenFunctionOptions()
+        codegen_function_options::Symbolics.CodegenFunctionOptions = Symbolics.CodegenFunctionOptions(),
+        static_array_literals::Bool = false
     )
     return GeneratedFunctionOptions{_gfo_bool(expression), _gfo_bool(wrap_gfw)}(
-        eval_expression, eval_module, compiler_options, codegen_function_options
+        eval_expression, eval_module, compiler_options, codegen_function_options,
+        static_array_literals
     )
 end
 
@@ -257,7 +265,7 @@ function SciMLFunctionOptions(;
         nanmath::Bool = true, wrap_code::Tuple = (identity, identity),
         iip_config::NTuple{2, Bool} = (true, true), sort_addmul::Bool = false,
         similarto = nothing, outputidxs = nothing, skipzeros::Bool = false,
-        jac_chunk_size::Int = 0,
+        jac_chunk_size::Int = 0, static_array_literals::Bool = false,
         kwargs...,
     )
     E = _gfo_bool(expression)
@@ -270,7 +278,7 @@ function SciMLFunctionOptions(;
     # to be named here for this to be safe — unknown keywords are dropped, not errored on.
     codegen = GeneratedFunctionOptions(;
         expression = Val{E}, wrap_gfw = Val{true}, eval_expression, eval_module,
-        compiler_options,
+        compiler_options, static_array_literals,
         codegen_function_options = Symbolics.CodegenFunctionOptions(;
             nanmath, wrap_code, checkbounds, iip_config, sort_addmul, optimize,
             similarto, outputidxs, skipzeros, kwargs...,
@@ -702,6 +710,11 @@ composed `wrap_code`, the resolved `optimize`, and the `output_type`-derived
   argument.
 - `extra_assignments`: Extra `Assignment` statements to prefix to `expr`, after all other
   assignments.
+- `static_array_literals`: Whether to rewrite `SymbolicUtils.array_literal`s of at most 256
+  elements in `expr` (after substituting observed equations) into `SVector`/`SMatrix`
+  constructions. An `array_literal` lowers to a freshly allocated `Vector`. That is harmless
+  on the CPU, but inside a GPU kernel each call draws on the device malloc pool, which is
+  not freed during a solve. Off by default; `GeneratedFunctionOptions` carries the switch.
 - `codegen_function_options`: A [`Symbolics.CodegenFunctionOptions`](@ref) holding the
   code-generation options forwarded to `codegen_function`. `build_function_wrapper` reads
   `wrap_code` and `optimize` from it and writes the transformed values back (the composed
@@ -728,6 +741,7 @@ struct BuildFunctionWrapperOptions
     extra_assignments::Vector{Assignment}
     n_param_buffers::Union{Nothing, Int}
     codegen::Symbolics.CodegenFunctionOptions
+    static_array_literals::Bool
 end
 
 function BuildFunctionWrapperOptions(;
@@ -737,7 +751,8 @@ function BuildFunctionWrapperOptions(;
         create_bindings = false, output_type = nothing, mkarray = nothing,
         wrap_mtkparameters = true, extra_assignments = Assignment[],
         n_param_buffers = nothing,
-        codegen_function_options::Symbolics.CodegenFunctionOptions = Symbolics.CodegenFunctionOptions()
+        codegen_function_options::Symbolics.CodegenFunctionOptions = Symbolics.CodegenFunctionOptions(),
+        static_array_literals::Bool = false
     )
     # The constructor only accepts valid `build_function_wrapper` options; there is no
     # `kwargs...` sink. Code-generation options are supplied as a fully-formed
@@ -748,7 +763,8 @@ function BuildFunctionWrapperOptions(;
     return BuildFunctionWrapperOptions(
         p_start, p_end, compress_args, non_standard_param_layout, u_arg, wrap_delays,
         histfn, histfn_symbolic, create_bindings, output_type, mkarray,
-        wrap_mtkparameters, extra_assignments, n_param_buffers, codegen_function_options
+        wrap_mtkparameters, extra_assignments, n_param_buffers, codegen_function_options,
+        static_array_literals
     )
 end
 
@@ -808,7 +824,7 @@ Base.@nospecializeinfer function build_function_wrapper(
     (;
         p_start, p_end, compress_args, non_standard_param_layout, u_arg, wrap_delays,
         histfn_symbolic, create_bindings, output_type, mkarray, wrap_mtkparameters,
-        extra_assignments, n_param_buffers,
+        extra_assignments, n_param_buffers, static_array_literals,
     ) = opts
     # Resolve the `sys`/`args`-dependent defaults (left as `nothing` when constructing the
     # options without a `sys` in scope). `length(args)` here is the original argument count,
@@ -864,6 +880,8 @@ Base.@nospecializeinfer function build_function_wrapper(
     ir_info = get_ir_info(sys)
     ir = get_irstructure(sys)
     expr = ir_info.obs_subber(expr)
+    # After observed substitution, so literals inside observed equations are covered too.
+    static_array_literals && (expr = _staticize_literals(expr))
     stmts = SU.IRStructureSearchBuffer(ir, Set{SymbolicT}())
     SU.search_variables!(stmts, expr; is_atomic = Returns(true))
     for subexpr in stmts

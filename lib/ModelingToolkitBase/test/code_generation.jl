@@ -400,3 +400,32 @@ end
     )
     @test_throws ArgumentError calculate_paramjac(sys)
 end
+
+# `static_array_literals` is an opt-in codegen option for GPU kernels.
+sal_tblsum(xs::AbstractVector, x) = sum(xs) * x
+@register_symbolic sal_tblsum(xs::AbstractVector, x)
+ModelingToolkitBase.Symbolics.@register_derivative sal_tblsum(xs, x) 2 sum(xs)
+@testset "`static_array_literals` rewrites array literals into static arrays" begin
+    @parameters a b c
+    @variables y(t) z(t)
+    @named sys = System(
+        [D(y) ~ -sal_tblsum([a, b, c], y) + t, D(z) ~ sal_tblsum([a, 2b], y) * t], t
+    )
+    sys = mtkcompile(sys)
+    gen = (g, sal) -> string(g(sys; expression = Val{true}, static_array_literals = sal)[2])
+    for g in (ModelingToolkitBase.generate_rhs, ModelingToolkitBase.generate_tgrad)
+        # Off by default: CPU codegen is unchanged.
+        @test occursin("array_literal", string(g(sys; expression = Val{true})[2]))
+        @test occursin("array_literal", gen(g, false))
+        @test !occursin("array_literal", gen(g, true))
+        @test occursin("SVector", gen(g, true))
+    end
+
+    op = [y => 1.0, z => 0.5, a => 0.1, b => 0.2, c => 0.3]
+    p0 = ODEProblem(sys, op, (0.0, 1.0); jac = true, tgrad = true)
+    p1 = ODEProblem(sys, op, (0.0, 1.0); jac = true, tgrad = true, static_array_literals = true)
+    u = p0.u0
+    @test p1.f(u, p1.p, 0.4) == p0.f(u, p0.p, 0.4)
+    @test p1.f.jac(u, p1.p, 0.4) == p0.f.jac(u, p0.p, 0.4)
+    @test p1.f.tgrad(u, p1.p, 0.4) == p0.f.tgrad(u, p0.p, 0.4)
+end
