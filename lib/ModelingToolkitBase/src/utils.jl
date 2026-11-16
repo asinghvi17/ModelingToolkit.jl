@@ -53,6 +53,9 @@ function detime_dvs(op)
 end
 
 function _detime_dvs(op, cache)
+    # `cache` makes the walk linear in the number of unique nodes: the equations
+    # of a system form a shared expression DAG, and a plain tree walk revisits
+    # its shared subexpressions exponentially often.
     get!(cache, op) do
         if !iscall(op)
             op
@@ -62,22 +65,15 @@ function _detime_dvs(op, cache)
             # `dot`-style terms over the detimed variables to `Any`.
             SSym(nameof(operation(op)); type = symtype(op), shape = SU.shape(op))
         else
-            f = operation(op)
-            args = _detime_dvs.(arguments(op), Ref(cache))
-            T = symtype(op)
-            try
-                t = maketerm(typeof(op), f, args, metadata(op))
-                # Rebuilding can degrade the term's recorded type to `Any`
-                # whenever `f` has no `promote_symtype` rule for the detimed
-                # arguments (indexing, views, broadcasts over the detimed
-                # array unknowns). Keep the type the term had.
-                if symtype(t) === Any && T !== Any
-                    t = maketerm(typeof(op), f, args, metadata(op); type = T)
-                end
-                t
-            catch
-                maketerm(typeof(op), f, args, metadata(op); type = T)
-            end
+            # Detiming preserves every leaf's symtype, so the rebuilt term has
+            # the type the original had. Pass it explicitly: re-deriving it with
+            # `promote_symtype` can fail, or degrade to `Any`, for operations
+            # that have no rule for the detimed arguments (indexing, views and
+            # broadcasts over array unknowns).
+            maketerm(
+                typeof(op), operation(op), _detime_dvs.(arguments(op), Ref(cache)),
+                metadata(op); type = symtype(op)
+            )
         end
     end
 end

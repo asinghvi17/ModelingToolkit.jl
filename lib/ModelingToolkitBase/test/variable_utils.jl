@@ -273,3 +273,25 @@ end
     twice = ModelingToolkitBase.shift2term(unwrap(Sh(tt, -1)(once)))
     @test isequal(twice, ModelingToolkitBase.shift2term(unwrap(Sh(tt, -2)(arr[1]))))
 end
+
+@testset "`detime_dvs` keeps symtypes and is linear in the shared DAG" begin
+    detime_dvs = ModelingToolkitBase.detime_dvs
+    tn = ModelingToolkitBase.t_nounits
+    @variables x(tn)[1:3] y(tn)
+    @parameters k[1:3]
+    dx = detime_dvs(unwrap(x))
+    @test SU.symtype(dx) == Vector{Real}
+    @test SU.shape(dx) == SU.shape(unwrap(x))
+    for ex in (x[1] * y + y^2, ModelingToolkitBase.LinearAlgebra.dot(k, x), sum(x .* k), x[2] + y)
+        dex = detime_dvs(unwrap(ex))
+        @test SU.symtype(dex) == SU.symtype(unwrap(ex))
+        @test !any(v -> SU.iscall(v) && isequal(SU.arguments(v), [unwrap(tn)]),
+            SU.search_variables(dex))
+    end
+    # A 40-deep shared DAG: a tree walk would visit ~2^40 nodes.
+    e = y
+    for _ in 1:40
+        e = sin(e) + cos(e) * y
+    end
+    @test @elapsed(detime_dvs(unwrap(e))) < 10
+end
