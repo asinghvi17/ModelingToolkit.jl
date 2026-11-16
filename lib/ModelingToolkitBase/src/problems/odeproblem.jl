@@ -99,8 +99,7 @@ function SciMLBase.ODEFunction{iip, spec}(
     end
 
     if jac
-        _jac = generate_jacobian(
-            sys, codegen_opts; simplify, sparse, jac_chunk_size = opts.jac_chunk_size)
+        _jac = generate_jacobian(sys, codegen_opts; simplify, sparse)
     else
         _jac = nothing
     end

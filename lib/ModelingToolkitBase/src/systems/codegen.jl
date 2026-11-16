@@ -519,22 +519,6 @@ function calculate_jacobian(
     return jac
 end
 
-"""
-    ChunkedJacobian(funcs, ranges)
-
-A Jacobian generated as separate pieces, for sparse Jacobians whose generated
-code is too large for a consumer to compile as one function (e.g. `ptxas` on a
-CUDA kernel). `funcs[k]` is the in-place function `f(out, u, p..., t)` — the same
-signature as the whole sparse Jacobian — writing `out[ranges[k]]`, where `out` is
-an `AbstractVector` holding the Jacobian's stored entries in `jac_prototype`
-`nzval` order. Calling the `ChunkedJacobian` applies every piece in order to
-`out.nzval` (or to `out` itself when `out` is already the `nzval` vector).
-"""
-struct ChunkedJacobian{F, R}
-    funcs::F
-    ranges::R
-end
-
 # `SymbolicUtils.array_literal` lowers to `reshape(vect(args), sz)` — a `Vector`
 # allocated on every call. Harmless on the CPU, but generated code that runs in
 # a GPU kernel pays for it out of the device malloc pool, which nothing frees
@@ -626,14 +610,6 @@ end
 
 _staticize_literals(x) = _staticize_walk(Symbolics.unwrap(x), IdDict{SymbolicT, SymbolicT}())
 
-function (cj::ChunkedJacobian)(out, u, p, t)
-    nzv = out isa AbstractVector ? out : out.nzval
-    for f in cj.funcs
-        f(nzv, u, p, t)
-    end
-    return out
-end
-
 """
     $(TYPEDSIGNATURES)
 
@@ -645,16 +621,12 @@ $GENERATE_X_KWARGS
 - `simplify`, `sparse`: Forwarded to [`calculate_jacobian`](@ref).
 - `checkbounds`: Whether to check correctness of indices at runtime if `sparse`.
   Also forwarded to `build_function_wrapper`.
-- `jac_chunk_size`: When `sparse` and positive, return a [`ChunkedJacobian`](@ref)
-  of `ceil(nnz / jac_chunk_size)` functions each writing a contiguous slice of the
-  Jacobian's `nzval` — split so each piece's generated code stays small enough to
-  compile (e.g. as a GPU kernel). `0` (the default) returns the single function.
 
 All other keyword arguments are forwarded to [`build_function_wrapper`](@ref).
 """
 function generate_jacobian(
         sys::System, opts::GeneratedFunctionOptions;
-        simplify::Bool = false, sparse::Bool = false, jac_chunk_size::Int = 0
+        simplify::Bool = false, sparse::Bool = false
     )
     (; eval_expression, eval_module, compiler_options) = opts
     expression = expression_val(opts)
@@ -677,37 +649,6 @@ function generate_jacobian(
     if is_time_dependent(sys)
         args = (args..., t)
         nargs = 3
-    end
-    if sparse && jac_chunk_size > 0
-        nzv = jac.nzval
-        ranges = collect(UnitRange{Int}, Iterators.partition(1:length(nzv), jac_chunk_size))
-        # A dense `nzval` slice with `outputidxs` writes `out[first(c):last(c)]` and
-        # — since `build_function_wrapper` subsets the IR to nodes reachable from
-        # `expr` — carries only the temporaries those entries need, unlike the
-        # sparse `rhss` path which drops `outputidxs`. The `assert_jac_length`
-        # header cannot hold for partial writes, so chunks always use
-        # `(identity, identity)` `wrap_code`.
-        funcs = map(ranges) do c
-            copts = setproperties(
-                opts.codegen, (;
-                    outputidxs = c, iip_config = (false, true),
-                    wrap_code = (identity, identity)
-                )
-            )
-            res = build_function_wrapper(
-                sys, collect(nzv[c]), collect(Any, args),
-                BuildFunctionWrapperOptions(;
-                    u_arg = 1, codegen_function_options = copts,
-                    static_array_literals = opts.static_array_literals
-                )
-            )
-            fns = maybe_compile_function(
-                expression, wrap_gfw, (2, nargs, is_split(sys)), res;
-                compiler_options, eval_expression, eval_module
-            )
-            return fns isa Tuple ? last(fns) : fns
-        end
-        return ChunkedJacobian(funcs, ranges)
     end
     res = build_function_wrapper(
         sys, jac, collect(Any, args), BuildFunctionWrapperOptions(;
