@@ -57,7 +57,9 @@ OrdinaryDiffEqTsit5 = "b1df2697-797e-41e3-8120-5422d3b24e4a"
 
 [sources]
 ModelingToolkitBase = {path = "lib/ModelingToolkitBase"}
+ModelingToolkitTearing = {url = "https://github.com/JuliaComputing/StateSelection.jl", rev = "5b64bbae1063cd67f41684fb85047303d66cb513", subdir = "lib/ModelingToolkitTearing"}
 SciCompDSL = {path = "lib/SciCompDSL"}
+StateSelection = {url = "https://github.com/JuliaComputing/StateSelection.jl", rev = "5b64bbae1063cd67f41684fb85047303d66cb513"}
 
 [extensions]
 MTKFMIExt = "FMIImport"
